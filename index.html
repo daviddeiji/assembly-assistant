@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16140f">
+<title>Assembly Assistant</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>THE ASSEMBLY</h1>
+  <span class="subtitle">Accounts</span>
+</header>
+
+<main id="view"></main>
+
+<button id="fab" class="fab" aria-label="Add entry">+</button>
+
+<nav class="tabbar">
+  <button data-tab="month" class="tab active">Month</button>
+  <button data-tab="history" class="tab">History</button>
+  <button data-tab="export" class="tab">Export</button>
+</nav>
+
+<div id="sheet" class="sheet hidden"></div>
+<div id="snackbar" class="snackbar hidden"></div>
+
+<script src="vendor/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

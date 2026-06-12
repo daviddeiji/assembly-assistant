@@ -1,0 +1,7 @@
+.claude/settings.local.json
+
+# Real business data — never commit. These are the filenames the app
+# generates for exports and backups, in case one is saved into this folder.
+assembly-backup-*.json
+assembly-entries-*.csv
+assembly-accounts-*.xlsx
