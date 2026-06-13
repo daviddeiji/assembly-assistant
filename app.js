@@ -50,10 +50,11 @@ function load() {
     if (d && d.version === 1 && Array.isArray(d.entries)) {
       d.settings = d.settings || {};
       d.invoices = Array.isArray(d.invoices) ? d.invoices : [];
+      d.clients = Array.isArray(d.clients) ? d.clients : [];
       return d;
     }
   } catch (err) { /* corrupt data — start fresh, backups are the safety net */ }
-  return { version: 1, entries: [], invoices: [], settings: {} };
+  return { version: 1, entries: [], invoices: [], clients: [], settings: {} };
 }
 
 function save() {
@@ -433,7 +434,9 @@ function restoreBackup(file) {
     if (!ok) return;
     data.settings = data.settings || {};
     data.invoices = Array.isArray(data.invoices) ? data.invoices : [];
+    data.clients = Array.isArray(data.clients) ? data.clients : [];
     state = data;
+    ensureClientsSeed();
     save();
     view.ym = thisYM();
     render();
@@ -700,6 +703,115 @@ function field(label, id, value, placeholder) {
     '<input id="' + id + '" value="' + esc(value || '') + '" placeholder="' + esc(placeholder || '') + '"></label>';
 }
 
+/* ---------- Saved clients (on-device) ---------- */
+
+function clientRef(c) { return 'Client #' + String(c.ref || 0).padStart(3, '0'); }
+function clientLabel(c) { return (c.name && c.name.trim()) ? c.name.trim() : clientRef(c); }
+
+// Pre-create the first client slot once (shows as "Client #001" until named).
+// No client name is hardcoded — keeps the public repo anonymous.
+function ensureClientsSeed() {
+  if (state.settings.clientsSeeded) return;
+  state.settings.clientsSeeded = true;
+  state.settings.clientSeq = state.settings.clientSeq || 0;
+  if (!state.clients.length) {
+    state.settings.clientSeq += 1;
+    state.clients.push({ id: uid(), ref: state.settings.clientSeq, name: '', uen: '', addr1: '', addr2: '', attn: '', terms: 30, createdAt: Date.now() });
+  }
+  save();
+}
+
+function sortedClients() {
+  return state.clients.slice().sort(function (a, b) { return (a.ref || 0) - (b.ref || 0); });
+}
+
+function clientRowHTML(c) {
+  const sub = [];
+  if (c.uen) sub.push(c.uen);
+  sub.push('Net ' + (c.terms != null ? c.terms : 30));
+  if (!(c.name && c.name.trim())) sub.push('unnamed');
+  return '<button class="entry" data-client="' + c.id + '">' +
+    '<span class="entry-main"><span class="entry-title">' + esc(clientLabel(c)) + '</span>' +
+    '<span class="entry-sub">' + esc(sub.join(' · ')) + '</span></span>' +
+    '<span class="entry-amt" style="font-size:12px;color:var(--muted);font-weight:600">' + esc(clientRef(c)) + '</span>' +
+    '</button>';
+}
+
+function openClientsList() {
+  const cs = sortedClients();
+  let html =
+    '<div class="sheet-inner">' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>Clients</h2></div>' +
+    '<p class="fineprint">Saved only on this device. When creating an invoice, pick a client to auto-fill the bill-to details.</p>' +
+    '<button class="btn" id="addClient">+ Add client</button>';
+  if (cs.length) html += '<h3 class="sec">Saved clients</h3>' + cs.map(clientRowHTML).join('');
+  else html += '<div class="empty">No clients yet.<br>Tap <b>+ Add client</b> to create one.</div>';
+  html += '</div>';
+  $sheet.innerHTML = html;
+  $sheet.classList.remove('hidden');
+  $sheet.scrollTop = 0;
+  const q = function (s) { return $sheet.querySelector(s); };
+  q('#closeSheet').onclick = closeSheet;
+  q('#addClient').onclick = function () { openClientForm(null); };
+  $sheet.querySelectorAll('.entry[data-client]').forEach(function (btn) {
+    btn.onclick = function () {
+      const c = state.clients.find(function (x) { return x.id === btn.dataset.client; });
+      if (c) openClientForm(c);
+    };
+  });
+}
+
+function openClientForm(existing) {
+  const isEdit = !!existing;
+  const c = existing || { name: '', uen: '', addr1: '', addr2: '', attn: '', terms: 30 };
+  const refLabel = isEdit ? clientRef(existing) : ('Client #' + String((state.settings.clientSeq || 0) + 1).padStart(3, '0'));
+  $sheet.innerHTML =
+    '<div class="sheet-inner">' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button>' +
+    '<h2>' + (isEdit ? 'Edit client' : 'New client') + '</h2>' +
+    (isEdit ? '<button class="danger-link" id="delClient">Delete</button>' : '') + '</div>' +
+    '<p class="fineprint">Reference: <b>' + esc(refLabel) + '</b> — used until you enter a name.</p>' +
+    field('Client name', 'kName', c.name, 'Leave blank to use ' + refLabel) +
+    field('UEN', 'kUen', c.uen, 'Registration no.') +
+    field('Address line 1', 'kAddr1', c.addr1, 'Street, unit') +
+    field('Address line 2', 'kAddr2', c.addr2, 'Postal / country') +
+    field('Attention (optional)', 'kAttn', c.attn, 'Contact person') +
+    field('Default payment terms (days)', 'kTerms', String(c.terms != null ? c.terms : 30), '30') +
+    '<button class="btn big" id="saveClient">Save client</button>' +
+    '</div>';
+  $sheet.classList.remove('hidden');
+  $sheet.scrollTop = 0;
+  const q = function (s) { return $sheet.querySelector(s); };
+  q('#closeSheet').onclick = openClientsList;
+  if (isEdit) {
+    q('#delClient').onclick = function () {
+      state.clients = state.clients.filter(function (x) { return x.id !== existing.id; });
+      save();
+      openClientsList();
+      showSnack('Client deleted');
+    };
+  }
+  q('#saveClient').onclick = function () {
+    const t = parseInt(q('#kTerms').value, 10);
+    const obj = {
+      name: q('#kName').value.trim(), uen: q('#kUen').value.trim(),
+      addr1: q('#kAddr1').value.trim(), addr2: q('#kAddr2').value.trim(),
+      attn: q('#kAttn').value.trim(), terms: isNaN(t) ? 30 : t,
+    };
+    if (isEdit) {
+      const i = state.clients.findIndex(function (x) { return x.id === existing.id; });
+      if (i !== -1) state.clients[i] = Object.assign({}, existing, obj);
+    } else {
+      state.settings.clientSeq = (state.settings.clientSeq || 0) + 1;
+      state.clients.push(Object.assign({ id: uid(), ref: state.settings.clientSeq, createdAt: Date.now() }, obj));
+    }
+    save();
+    requestPersist();
+    openClientsList();
+    showSnack('Client saved');
+  };
+}
+
 /* ---------- Invoice tab ---------- */
 
 function invRowHTML(inv) {
@@ -718,6 +830,7 @@ function renderInvoiceTab() {
     '<div class="card"><h3>Create an invoice</h3>' +
     '<p>A branded .xlsx invoice with your logo, ready to send. Generating one also logs the total as income.</p>' +
     '<button id="newInv" class="btn">New invoice</button>' +
+    '<button id="clientsBtn" class="btn ghost">Clients</button>' +
     '<button id="coBtn" class="btn ghost">Company details</button></div>';
   if (invs.length) {
     html += '<h3 class="sec">Past invoices</h3>' + invs.map(invRowHTML).join('');
@@ -729,6 +842,7 @@ function renderInvoiceTab() {
     if (companyConfigured()) openInvoiceForm();
     else openCompanyForm(true);
   };
+  document.getElementById('clientsBtn').onclick = function () { openClientsList(); };
   document.getElementById('coBtn').onclick = function () { openCompanyForm(false); };
   const banner = document.getElementById('coBanner');
   if (banner) banner.onclick = function () { openCompanyForm(false); };
@@ -806,6 +920,24 @@ function openInvoiceForm(prefill) {
     ? base.lineItems.map(function (it) { return { desc: it.desc, qty: it.qty, unitPrice: it.unitPrice }; })
     : [{ desc: '', qty: 1, unitPrice: 0 }];
 
+  // Client picker: pre-select the matching saved client, else default to the
+  // first (named) client, else "Other" for a one-off typed client.
+  const clients = sortedClients();
+  let selClientId = '__other';
+  if (client.name) {
+    const m = clients.find(function (c) { return c.name && c.name.trim().toLowerCase() === client.name.trim().toLowerCase(); });
+    selClientId = m ? m.id : '__other';
+  } else if (clients.length) {
+    const named = clients.find(function (c) { return c.name && c.name.trim(); });
+    selClientId = (named || clients[0]).id;
+  }
+  const clientPicker = clients.length
+    ? '<label class="field"><span>Client</span><select id="iClientSel">' +
+      clients.map(function (c) { return '<option value="' + c.id + '"' + (c.id === selClientId ? ' selected' : '') + '>' + esc(clientLabel(c)) + '</option>'; }).join('') +
+      '<option value="__other"' + (selClientId === '__other' ? ' selected' : '') + '>Other (type below)</option>' +
+      '</select></label>'
+    : '';
+
   $sheet.innerHTML =
     '<div class="sheet-inner">' +
     '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>New invoice</h2></div>' +
@@ -816,6 +948,7 @@ function openInvoiceForm(prefill) {
     '</div></div>' +
 
     '<h3 class="sec">Bill to</h3>' +
+    clientPicker +
     field('Client name', 'iName', client.name, 'Who is this invoice for?') +
     field('Client UEN', 'iUen', client.uen, 'Registration no.') +
     field('Address line 1', 'iAddr1', client.addr1, 'Street, unit') +
@@ -913,6 +1046,28 @@ function openInvoiceForm(prefill) {
   q('#iTerms').oninput = updateDue;
   q('#addLi').onclick = function () { readItems(); if (items.length < 8) { items.push({ desc: '', qty: 1, unitPrice: 0 }); renderItems(); } };
   q('#closeSheet').onclick = closeSheet;
+
+  function fillFromClient(c) {
+    q('#iName').value = c.name || '';
+    q('#iUen').value = c.uen || '';
+    q('#iAddr1').value = c.addr1 || '';
+    q('#iAddr2').value = c.addr2 || '';
+    q('#iAttn').value = c.attn || '';
+    if (c.terms != null) q('#iTerms').value = c.terms;
+  }
+  const clientSel = q('#iClientSel');
+  if (clientSel) {
+    clientSel.onchange = function () {
+      if (clientSel.value === '__other') return;
+      const c = state.clients.find(function (x) { return x.id === clientSel.value; });
+      if (c) { fillFromClient(c); updateDue(); }
+    };
+    // First invoice (no prefill client): fill the bill-to from the default client
+    if (!(base.client && base.client.name) && selClientId !== '__other') {
+      const c0 = state.clients.find(function (x) { return x.id === selClientId; });
+      if (c0) fillFromClient(c0);
+    }
+  }
 
   q('#genInv').onclick = function () {
     readItems();
@@ -1167,6 +1322,7 @@ document.querySelectorAll('.tab').forEach(function (b) {
 
 document.getElementById('fab').onclick = function () { openSheet(); };
 
+ensureClientsSeed();
 render();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
