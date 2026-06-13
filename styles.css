@@ -199,6 +199,22 @@ h3.sec {
 .seg button.on { color: #fff; }
 .seg button[data-t="income"].on { background: var(--green); }
 .seg button[data-t="expense"].on { background: var(--red); }
+.seg button[data-g].on { background: var(--ink); }
+
+/* ---------- Invoice line items ---------- */
+.li-card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px; margin-bottom: 10px; }
+.li-desc { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); margin-bottom: 8px; }
+.li-row { display: flex; gap: 8px; align-items: flex-end; }
+.li-field { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.li-field span { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.li-field input { width: 100%; box-sizing: border-box; padding: 12px; font-size: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); }
+.li-del { width: 46px; height: 46px; flex: none; border: 1px solid var(--line); background: var(--panel); border-radius: 10px; color: var(--red); font-size: 16px; }
+.li-del-spacer { width: 46px; flex: none; }
+.li-amt { margin-top: 8px; font-size: 13px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+.inv-totals { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 8px 18px; margin: 16px 0; }
+
+textarea.li-desc { font-family: inherit; resize: vertical; min-height: 76px; }
 
 .field { display: block; margin-bottom: 16px; }
 .field > span { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; font-weight: 600; letter-spacing: .3px; }

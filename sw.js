@@ -1,12 +1,13 @@
 'use strict';
 
-const CACHE = 'assembly-v3';
+const CACHE = 'assembly-v4';
 
 const CORE = [
   './',
   './index.html',
   './styles.css',
   './app.js',
+  './logo.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -16,8 +17,12 @@ self.addEventListener('install', function (e) {
   e.waitUntil(
     caches.open(CACHE).then(function (c) {
       return c.addAll(CORE).then(function () {
-        // Excel library is optional — app still works without it
-        return c.add('./vendor/xlsx.full.min.js').catch(function () {});
+        // Excel libraries are large and optional to the core UI — cache them
+        // best-effort so a slow install still succeeds.
+        return Promise.all([
+          c.add('./vendor/xlsx.full.min.js').catch(function () {}),
+          c.add('./vendor/exceljs.min.js').catch(function () {}),
+        ]);
       });
     }).then(function () { return self.skipWaiting(); })
   );

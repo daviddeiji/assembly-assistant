@@ -5,3 +5,7 @@
 assembly-backup-*.json
 assembly-entries-*.csv
 assembly-accounts-*.xlsx
+invoice-*.xlsx
+
+# Invoice spec contains real company + bank details — keep it out of the public repo.
+INVOICE_SPEC.md

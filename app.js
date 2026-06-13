@@ -49,10 +49,11 @@ function load() {
     const d = JSON.parse(localStorage.getItem(LS_KEY));
     if (d && d.version === 1 && Array.isArray(d.entries)) {
       d.settings = d.settings || {};
+      d.invoices = Array.isArray(d.invoices) ? d.invoices : [];
       return d;
     }
   } catch (err) { /* corrupt data — start fresh, backups are the safety net */ }
-  return { version: 1, entries: [], settings: {} };
+  return { version: 1, entries: [], invoices: [], settings: {} };
 }
 
 function save() {
@@ -148,6 +149,7 @@ function render() {
   });
   if (view.tab === 'month') renderMonth();
   else if (view.tab === 'history') renderHistory();
+  else if (view.tab === 'invoice') renderInvoiceTab();
   else renderExport();
 }
 
@@ -430,6 +432,7 @@ function restoreBackup(file) {
     const ok = confirm('Replace the ' + state.entries.length + ' entries on this device with the ' + data.entries.length + ' entries from the backup?');
     if (!ok) return;
     data.settings = data.settings || {};
+    data.invoices = Array.isArray(data.invoices) ? data.invoices : [];
     state = data;
     save();
     view.ym = thisYM();
@@ -635,6 +638,525 @@ function openSheet(existing, prefill) {
   };
 
   if (!isEdit && !prefill) q('#fAmount').focus();
+}
+
+/* ===================== Invoices ===================== */
+
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+// All company / payment details live ON-DEVICE (localStorage), never hardcoded
+// in the public repo. The user fills them in once via the Company details form.
+function getCompany() {
+  const c = state.settings.company || {};
+  return {
+    name: c.name || '', uen: c.uen || '', addr1: c.addr1 || '', addr2: c.addr2 || '',
+    bankName: c.bankName || '', bankAccName: c.bankAccName || '', bankAccNo: c.bankAccNo || '',
+    paynow: c.paynow || '', noteText: c.noteText || '', noteClient: c.noteClient || '',
+  };
+}
+
+function companyConfigured() {
+  const c = getCompany();
+  return !!(c.name && c.bankAccNo);
+}
+
+// Brand colours as ExcelJS ARGB (FF = fully opaque)
+const C_GOLD = 'FFC9A227', C_INK = 'FF1A1A1A', C_GREY = 'FF666666';
+const C_STRIPE = 'FFFAF7EF', C_BORDER = 'FFD9D9D9', C_WHITE = 'FFFFFFFF';
+const NUMFMT = '#,##0.00;(#,##0.00);"-"';
+
+// The related-party note is shown only when the bill-to client name contains
+// the (user-configured) trigger text. Both the note and trigger live on-device.
+function noteTriggered(company, clientName) {
+  if (!company.noteText || !company.noteClient) return false;
+  return (clientName || '').toUpperCase().indexOf(company.noteClient.toUpperCase()) !== -1;
+}
+
+function invYear(dateISO) { return dateISO.slice(0, 4); }
+
+function fmtInvNumber(year, seq) {
+  return 'AMD-' + year + '-' + String(seq).padStart(3, '0');
+}
+
+function nextInvoiceNumber(year) {
+  let max = 0;
+  state.invoices.forEach(function (inv) {
+    const m = /^AMD-(\d{4})-(\d{3,})$/.exec(inv.number || '');
+    if (m && m[1] === year) max = Math.max(max, +m[2]);
+  });
+  const stored = (state.settings.invoiceSeq && state.settings.invoiceSeq[year]) || 0;
+  return Math.max(max, stored) + 1;
+}
+
+function addDays(iso, days) {
+  const p = iso.split('-');
+  const d = new Date(+p[0], +p[1] - 1, +p[2]);
+  d.setDate(d.getDate() + days);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function field(label, id, value, placeholder) {
+  return '<label class="field"><span>' + esc(label) + '</span>' +
+    '<input id="' + id + '" value="' + esc(value || '') + '" placeholder="' + esc(placeholder || '') + '"></label>';
+}
+
+/* ---------- Invoice tab ---------- */
+
+function invRowHTML(inv) {
+  return '<button class="entry" data-inv="' + inv.id + '">' +
+    '<span class="entry-main"><span class="entry-title">' + esc(inv.number) + ' · ' + esc(inv.client.name) + '</span>' +
+    '<span class="entry-sub">' + esc(fmtDate(inv.date)) + (inv.gstMode === 'registered' ? ' · GST' : '') + '</span></span>' +
+    '<span class="entry-amt">' + fmtMoney(inv.total) + '</span>' +
+    '</button>';
+}
+
+function renderInvoiceTab() {
+  const invs = state.invoices.slice().sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
+  const configured = companyConfigured();
+  let html =
+    (!configured ? '<button class="banner" id="coBanner">⚙️ Set your company &amp; bank details first — tap to fill them in</button>' : '') +
+    '<div class="card"><h3>Create an invoice</h3>' +
+    '<p>A branded .xlsx invoice with your logo, ready to send. Generating one also logs the total as income.</p>' +
+    '<button id="newInv" class="btn">New invoice</button>' +
+    '<button id="coBtn" class="btn ghost">Company details</button></div>';
+  if (invs.length) {
+    html += '<h3 class="sec">Past invoices</h3>' + invs.map(invRowHTML).join('');
+  } else {
+    html += '<div class="empty">No invoices yet.<br>Tap <b>New invoice</b> to create your first.</div>';
+  }
+  $view.innerHTML = html;
+  document.getElementById('newInv').onclick = function () {
+    if (companyConfigured()) openInvoiceForm();
+    else openCompanyForm(true);
+  };
+  document.getElementById('coBtn').onclick = function () { openCompanyForm(false); };
+  const banner = document.getElementById('coBanner');
+  if (banner) banner.onclick = function () { openCompanyForm(false); };
+  $view.querySelectorAll('.entry[data-inv]').forEach(function (btn) {
+    btn.onclick = function () {
+      const inv = state.invoices.find(function (x) { return x.id === btn.dataset.inv; });
+      if (inv) openInvoiceView(inv);
+    };
+  });
+}
+
+/* ---------- Company details (stored on-device) ---------- */
+
+function openCompanyForm(thenNewInvoice) {
+  const c = getCompany();
+  $sheet.innerHTML =
+    '<div class="sheet-inner">' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>Company details</h2></div>' +
+    '<p class="fineprint">These appear on your invoices. They are stored only on this device — never uploaded, and never put in the app’s public code.</p>' +
+    '<h3 class="sec">Business</h3>' +
+    field('Company name', 'cName', c.name, 'Registered company name') +
+    field('UEN', 'cUen', c.uen, 'Registration no.') +
+    field('Address line 1', 'cAddr1', c.addr1, 'Street, unit') +
+    field('Address line 2', 'cAddr2', c.addr2, 'Postal / country') +
+    '<h3 class="sec">Payment</h3>' +
+    field('Bank', 'cBank', c.bankName, 'Bank name') +
+    field('Account name', 'cAccName', c.bankAccName, 'Name on the account') +
+    field('Account number', 'cAccNo', c.bankAccNo, 'Bank account number') +
+    field('PayNow (UEN / phone)', 'cPaynow', c.paynow, 'PayNow identifier') +
+    '<h3 class="sec">Related-party note (optional)</h3>' +
+    '<label class="field"><span>Note text — printed only for the client below</span>' +
+    '<textarea id="cNote" class="li-desc" rows="3" placeholder="e.g. This invoice is issued under a related-party arrangement…">' + esc(c.noteText) + '</textarea></label>' +
+    field('Show note when client name contains', 'cNoteClient', c.noteClient, 'e.g. a client short-code') +
+    '<button class="btn big" id="saveCompany">Save company details</button>' +
+    '</div>';
+  $sheet.classList.remove('hidden');
+  $sheet.scrollTop = 0;
+  const q = function (s) { return $sheet.querySelector(s); };
+  q('#closeSheet').onclick = closeSheet;
+  q('#saveCompany').onclick = function () {
+    state.settings.company = {
+      name: q('#cName').value.trim(), uen: q('#cUen').value.trim(),
+      addr1: q('#cAddr1').value.trim(), addr2: q('#cAddr2').value.trim(),
+      bankName: q('#cBank').value.trim(), bankAccName: q('#cAccName').value.trim(),
+      bankAccNo: q('#cAccNo').value.trim(), paynow: q('#cPaynow').value.trim(),
+      noteText: q('#cNote').value.trim(), noteClient: q('#cNoteClient').value.trim(),
+    };
+    save();
+    requestPersist();
+    if (thenNewInvoice && companyConfigured()) {
+      closeSheet();
+      openInvoiceForm();
+    } else {
+      closeSheet();
+      render();
+      showSnack('Company details saved');
+    }
+  };
+}
+
+/* ---------- Invoice form ---------- */
+
+function openInvoiceForm(prefill) {
+  // No prefill given → start from the most recent invoice (handy for a recurring
+  // monthly retainer). The very first invoice starts blank.
+  if (!prefill && state.invoices.length) {
+    const last = state.invoices.slice().sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); })[0];
+    prefill = { client: last.client, lineItems: last.lineItems, gstMode: last.gstMode, terms: last.terms };
+  }
+  const base = prefill || {};
+  const client = Object.assign({ name: '', uen: '', addr1: '', addr2: '', attn: '' }, base.client || {});
+  let gstMode = base.gstMode || 'none';
+  let autoNum = fmtInvNumber(invYear(todayISO()), nextInvoiceNumber(invYear(todayISO())));
+  let items = (base.lineItems && base.lineItems.length)
+    ? base.lineItems.map(function (it) { return { desc: it.desc, qty: it.qty, unitPrice: it.unitPrice }; })
+    : [{ desc: '', qty: 1, unitPrice: 0 }];
+
+  $sheet.innerHTML =
+    '<div class="sheet-inner">' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>New invoice</h2></div>' +
+
+    '<div class="field"><span>GST</span><div class="seg" id="gstSeg">' +
+    '<button data-g="none"' + (gstMode === 'none' ? ' class="on"' : '') + '>Not GST-reg.</button>' +
+    '<button data-g="registered"' + (gstMode === 'registered' ? ' class="on"' : '') + '>GST 9%</button>' +
+    '</div></div>' +
+
+    '<h3 class="sec">Bill to</h3>' +
+    field('Client name', 'iName', client.name, 'Who is this invoice for?') +
+    field('Client UEN', 'iUen', client.uen, 'Registration no.') +
+    field('Address line 1', 'iAddr1', client.addr1, 'Street, unit') +
+    field('Address line 2', 'iAddr2', client.addr2, 'Postal / country') +
+    field('Attention (optional)', 'iAttn', client.attn, 'Contact person') +
+
+    '<h3 class="sec">Invoice details</h3>' +
+    field('Invoice number', 'iNum', autoNum, '') +
+    '<label class="field"><span>Invoice date</span><input type="date" id="iDate" value="' + todayISO() + '"></label>' +
+    field('Payment terms (days)', 'iTerms', String(base.terms != null ? base.terms : 30), '30') +
+    '<div class="fineprint" id="iDue"></div>' +
+
+    '<h3 class="sec">Line items</h3>' +
+    '<div id="liList"></div>' +
+    '<button class="btn ghost" id="addLi">+ Add line item</button>' +
+
+    '<div class="inv-totals" id="invTotals"></div>' +
+
+    '<button class="btn big" id="genInv">Generate invoice</button>' +
+    '<p class="fineprint">Saves a branded .xlsx to your Downloads and logs the total as income.</p>' +
+    '</div>';
+
+  $sheet.classList.remove('hidden');
+  $sheet.scrollTop = 0;
+  const q = function (s) { return $sheet.querySelector(s); };
+
+  function readItems() {
+    $sheet.querySelectorAll('.li-card').forEach(function (card) {
+      const i = +card.dataset.i;
+      items[i] = {
+        desc: card.querySelector('.li-desc').value,
+        qty: parseFloat(card.querySelector('.li-qty').value) || 0,
+        unitPrice: Math.round((parseFloat(card.querySelector('.li-price').value) || 0) * 100),
+      };
+    });
+  }
+
+  function updateAmounts() {
+    let subtotal = 0;
+    items.forEach(function (it, i) {
+      const amt = Math.round(it.qty * it.unitPrice);
+      subtotal += amt;
+      const el = q('.li-amt[data-i="' + i + '"]');
+      if (el) el.textContent = 'Amount: ' + fmtMoney(amt);
+    });
+    const gst = gstMode === 'registered' ? Math.round(subtotal * 0.09) : 0;
+    q('#invTotals').innerHTML =
+      '<div class="pnl-row"><span>Subtotal</span><span>' + fmtMoney(subtotal) + '</span></div>' +
+      '<div class="pnl-row"><span>' + (gstMode === 'registered' ? 'GST (9%)' : 'GST (not applicable)') + '</span><span>' + fmtMoney(gst) + '</span></div>' +
+      '<div class="pnl-row net"><span>Total</span><span>' + fmtMoney(subtotal + gst) + '</span></div>';
+  }
+
+  function renderItems() {
+    q('#liList').innerHTML = items.map(function (it, i) {
+      return '<div class="li-card" data-i="' + i + '">' +
+        '<input class="li-desc" placeholder="Description" value="' + esc(it.desc) + '">' +
+        '<div class="li-row">' +
+        '<label class="li-field"><span>Qty</span><input class="li-qty" inputmode="decimal" value="' + esc(it.qty) + '"></label>' +
+        '<label class="li-field"><span>Unit price (S$)</span><input class="li-price" inputmode="decimal" value="' + (it.unitPrice ? (it.unitPrice / 100).toFixed(2) : '') + '"></label>' +
+        (items.length > 1 ? '<button class="li-del" data-i="' + i + '" aria-label="Remove item">✕</button>' : '<span class="li-del-spacer"></span>') +
+        '</div><div class="li-amt" data-i="' + i + '"></div></div>';
+    }).join('');
+    q('#liList').querySelectorAll('.li-card').forEach(function (card) {
+      card.querySelectorAll('input').forEach(function (inp) {
+        inp.oninput = function () { readItems(); updateAmounts(); };
+      });
+      const del = card.querySelector('.li-del');
+      if (del) del.onclick = function () { readItems(); items.splice(+del.dataset.i, 1); renderItems(); };
+    });
+    q('#addLi').disabled = items.length >= 8;
+    updateAmounts();
+  }
+
+  function updateDue() {
+    const t = parseInt(q('#iTerms').value, 10);
+    const days = isNaN(t) ? 30 : t;
+    q('#iDue').textContent = 'Due ' + fmtDate(addDays(q('#iDate').value || todayISO(), days)) + ' · Net ' + days;
+  }
+
+  q('#gstSeg').querySelectorAll('button').forEach(function (b) {
+    b.onclick = function () {
+      gstMode = b.dataset.g;
+      q('#gstSeg').querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x.dataset.g === gstMode); });
+      updateAmounts();
+    };
+  });
+
+  q('#iDate').onchange = function () {
+    const numInp = q('#iNum');
+    const y = invYear(q('#iDate').value || todayISO());
+    const newAuto = fmtInvNumber(y, nextInvoiceNumber(y));
+    if (numInp.value === autoNum) { numInp.value = newAuto; autoNum = newAuto; }
+    updateDue();
+  };
+  q('#iTerms').oninput = updateDue;
+  q('#addLi').onclick = function () { readItems(); if (items.length < 8) { items.push({ desc: '', qty: 1, unitPrice: 0 }); renderItems(); } };
+  q('#closeSheet').onclick = closeSheet;
+
+  q('#genInv').onclick = function () {
+    readItems();
+    const clientObj = {
+      name: q('#iName').value.trim(),
+      uen: q('#iUen').value.trim(),
+      addr1: q('#iAddr1').value.trim(),
+      addr2: q('#iAddr2').value.trim(),
+      attn: q('#iAttn').value.trim(),
+    };
+    if (!clientObj.name) { q('#iName').focus(); showSnack('Enter a client name'); return; }
+    const clean = items.filter(function (it) { return it.qty > 0 && it.unitPrice > 0; }).slice(0, 8);
+    if (!clean.length) { showSnack('Add at least one item with qty and price'); return; }
+    const subtotal = clean.reduce(function (s, it) { return s + Math.round(it.qty * it.unitPrice); }, 0);
+    const gst = gstMode === 'registered' ? Math.round(subtotal * 0.09) : 0;
+    const dISO = q('#iDate').value || todayISO();
+    const t = parseInt(q('#iTerms').value, 10);
+    const terms = isNaN(t) ? 30 : t;
+    generateInvoice({
+      id: uid(),
+      number: q('#iNum').value.trim() || autoNum,
+      date: dISO,
+      dueDate: addDays(dISO, terms),
+      terms: terms,
+      client: clientObj,
+      lineItems: clean,
+      gstMode: gstMode,
+      subtotal: subtotal,
+      gst: gst,
+      total: subtotal + gst,
+      createdAt: Date.now(),
+    });
+  };
+
+  renderItems();
+  updateDue();
+}
+
+/* ---------- Re-download / duplicate a stored invoice ---------- */
+
+function openInvoiceView(inv) {
+  const lines = inv.lineItems.map(function (it, i) {
+    return '<div class="pnl-row"><span>' + esc(it.desc || '(item ' + (i + 1) + ')') + ' × ' + esc(it.qty) + '</span><span>' + fmtMoney(Math.round(it.qty * it.unitPrice)) + '</span></div>';
+  }).join('');
+  $sheet.innerHTML =
+    '<div class="sheet-inner">' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>' + esc(inv.number) + '</h2></div>' +
+    '<div class="card"><h3>' + esc(inv.client.name) + '</h3>' +
+    '<p>' + esc(fmtDate(inv.date)) + ' · Due ' + esc(fmtDate(inv.dueDate)) + ' · Net ' + inv.terms + '</p></div>' +
+    '<h3 class="sec">Items</h3>' + lines +
+    '<div class="inv-totals">' +
+    '<div class="pnl-row"><span>Subtotal</span><span>' + fmtMoney(inv.subtotal) + '</span></div>' +
+    '<div class="pnl-row"><span>' + (inv.gstMode === 'registered' ? 'GST (9%)' : 'GST (not applicable)') + '</span><span>' + fmtMoney(inv.gst) + '</span></div>' +
+    '<div class="pnl-row net"><span>Total</span><span>' + fmtMoney(inv.total) + '</span></div></div>' +
+    '<button class="btn big" id="reDl">Download .xlsx again</button>' +
+    '<button class="btn ghost big" id="dupInv">Duplicate as new invoice</button>' +
+    '<p class="fineprint">Re-downloading does not log income again. Duplicating starts a new invoice with the next number.</p>' +
+    '</div>';
+  $sheet.classList.remove('hidden');
+  $sheet.scrollTop = 0;
+  const q = function (s) { return $sheet.querySelector(s); };
+  q('#closeSheet').onclick = closeSheet;
+  q('#reDl').onclick = function () {
+    buildInvoiceWorkbook(inv).then(function (buf) {
+      download(buf, 'invoice-' + inv.number + '.xlsx', XLSX_MIME);
+      showSnack('Invoice downloaded');
+    }).catch(function () { showSnack('Could not build the file'); });
+  };
+  q('#dupInv').onclick = function () {
+    openInvoiceForm({ client: inv.client, lineItems: inv.lineItems, gstMode: inv.gstMode, terms: inv.terms });
+  };
+}
+
+/* ---------- Generate: build file, download, log income, persist ---------- */
+
+function generateInvoice(inv) {
+  if (typeof ExcelJS === 'undefined') { showSnack('Invoice library missing — reload the app'); return; }
+  if (!companyConfigured()) { showSnack('Set your company details first'); openCompanyForm(false); return; }
+  buildInvoiceWorkbook(inv).then(function (buf) {
+    download(buf, 'invoice-' + inv.number + '.xlsx', XLSX_MIME);
+
+    const entry = {
+      id: uid(),
+      type: 'income',
+      date: inv.date,
+      desc: 'Invoice ' + inv.number,
+      client: inv.client.name,
+      category: noteTriggered(getCompany(), inv.client.name) ? 'Retainer income' : 'Other income',
+      gst: inv.gstMode === 'registered' ? 'incl' : 'none',
+      amountCents: inv.total,
+      createdAt: Date.now(),
+    };
+    inv.loggedEntryId = entry.id;
+    state.entries.push(entry);
+    state.invoices.push(inv);
+
+    state.settings.invoiceSeq = state.settings.invoiceSeq || {};
+    const m = /^AMD-(\d{4})-(\d{3,})$/.exec(inv.number);
+    if (m) state.settings.invoiceSeq[m[1]] = Math.max(state.settings.invoiceSeq[m[1]] || 0, +m[2]);
+
+    save();
+    requestPersist();
+    closeSheet();
+    view.tab = 'invoice';
+    render();
+    showSnack('Invoice created & logged as income');
+  }).catch(function () {
+    showSnack('Could not build the invoice file');
+  });
+}
+
+/* ---------- ExcelJS workbook matching INVOICE_SPEC.md ---------- */
+
+function buildInvoiceWorkbook(inv) {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Invoice', {
+    views: [{ showGridLines: false }],
+    pageSetup: {
+      orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 1,
+      margins: { left: 0.4, right: 0.4, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 },
+    },
+  });
+  ws.columns = [{ width: 6 }, { width: 42 }, { width: 12 }, { width: 14 }, { width: 16 }];
+
+  const R = { horizontal: 'right' }, L = { horizontal: 'left' }, M = { horizontal: 'center' };
+
+  function set(addr, value, font, align, fill, numFmt) {
+    const cell = ws.getCell(addr);
+    if (value !== undefined) cell.value = value;
+    if (font) cell.font = Object.assign({ name: 'Georgia' }, font);
+    if (align) cell.alignment = align;
+    if (fill) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } };
+    if (numFmt) cell.numFmt = numFmt;
+    return cell;
+  }
+
+  // Logo at A1, ~145px wide, aspect kept (~1.30:1)
+  if (window.ASSEMBLY_LOGO) {
+    const b64 = window.ASSEMBLY_LOGO.replace(/^data:image\/png;base64,/, '');
+    const imgId = wb.addImage({ base64: b64, extension: 'png' });
+    ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: 145, height: Math.round(145 / 1.304) } });
+  }
+
+  const co = getCompany();
+
+  // Header (right)
+  set('E1', 'INVOICE', { size: 22, bold: true, color: { argb: C_INK } }, R);
+  set('E3', co.name, { size: 10, bold: true, color: { argb: C_INK } }, R);
+  if (co.uen) set('E4', 'UEN: ' + co.uen, { size: 9, color: { argb: C_GREY } }, R);
+  set('E5', co.addr1, { size: 9, color: { argb: C_GREY } }, R);
+  set('E6', co.addr2, { size: 9, color: { argb: C_GREY } }, R);
+
+  // Row 8 divider — medium gold bottom border across A–E
+  ['A8', 'B8', 'C8', 'D8', 'E8'].forEach(function (a) {
+    ws.getCell(a).border = { bottom: { style: 'medium', color: { argb: C_GOLD } } };
+  });
+
+  // Bill to
+  set('A10', 'BILL TO', { size: 9, bold: true, color: { argb: C_GOLD } }, L);
+  set('A11', inv.client.name, { size: 10, bold: true, color: { argb: C_INK } }, L);
+  const billLines = [];
+  if (inv.client.uen) billLines.push(inv.client.uen);
+  if (inv.client.addr1) billLines.push(inv.client.addr1);
+  if (inv.client.addr2) billLines.push(inv.client.addr2);
+  if (inv.client.attn) billLines.push('Attn: ' + inv.client.attn);
+  billLines.slice(0, 4).forEach(function (t, i) {
+    set('A' + (12 + i), t, { size: 9, color: { argb: C_GREY } }, L);
+  });
+
+  // Meta block (D labels / E values)
+  const lab = { size: 9, bold: true, color: { argb: C_INK } };
+  const val = { size: 9, color: { argb: C_INK } };
+  set('D10', 'Invoice No.', lab, R); set('E10', inv.number, val, R);
+  set('D11', 'Invoice Date', lab, R); set('E11', fmtDate(inv.date), val, R);
+  set('D12', 'Due Date', lab, R); set('E12', fmtDate(inv.dueDate), val, R);
+  set('D13', 'Terms', lab, R); set('E13', 'Net ' + inv.terms, val, R);
+
+  // Line-item header (row 17)
+  const head = { size: 9, bold: true, color: { argb: C_WHITE } };
+  set('A17', 'No.', head, M, C_INK);
+  set('B17', 'Description', head, L, C_INK);
+  set('C17', 'Qty', head, M, C_INK);
+  set('D17', 'Unit Price (SGD)', head, M, C_INK);
+  set('E17', 'Amount (SGD)', head, M, C_INK);
+
+  // Item rows 18–25 (8 rows)
+  for (let i = 0; i < 8; i++) {
+    const r = 18 + i;
+    const item = inv.lineItems[i];
+    const fill = (r % 2 === 0) ? C_STRIPE : null;
+    const f = { size: 9, color: { argb: C_INK } };
+    set('A' + r, item ? (i + 1) : undefined, f, M, fill);
+    set('B' + r, item ? item.desc : undefined, f, L, fill);
+    set('C' + r, item ? item.qty : undefined, f, M, fill);
+    set('D' + r, item ? +(item.unitPrice / 100).toFixed(2) : undefined, f, R, fill, NUMFMT);
+    const eCell = set('E' + r, undefined, f, R, fill, NUMFMT);
+    eCell.value = {
+      formula: 'IF(OR(C' + r + '="",D' + r + '=""),"",C' + r + '*D' + r + ')',
+      result: item ? +((item.qty * item.unitPrice) / 100).toFixed(2) : undefined,
+    };
+    ['A', 'B', 'C', 'D', 'E'].forEach(function (col) {
+      const cell = ws.getCell(col + r);
+      const b = cell.border || {};
+      b.bottom = { style: 'thin', color: { argb: C_BORDER } };
+      cell.border = b;
+    });
+  }
+
+  // Totals
+  set('D27', 'Subtotal', lab, R);
+  set('E27', undefined, val, R, null, NUMFMT).value = { formula: 'SUM(E18:E25)', result: +(inv.subtotal / 100).toFixed(2) };
+  if (inv.gstMode === 'registered') {
+    set('D28', 'GST (9%)', lab, R);
+    set('E28', undefined, val, R, null, NUMFMT).value = { formula: 'E27*0.09', result: +(inv.gst / 100).toFixed(2) };
+  } else {
+    set('D28', 'GST (not applicable)', lab, R);
+    set('E28', 0, val, R, null, NUMFMT);
+  }
+  const totFont = { size: 11, bold: true, color: { argb: C_WHITE } };
+  set('D29', 'TOTAL (SGD)', totFont, R, C_GOLD);
+  set('E29', undefined, totFont, R, C_GOLD, NUMFMT).value = { formula: 'E27+E28', result: +(inv.total / 100).toFixed(2) };
+
+  // Footer — payment details (from on-device company settings)
+  set('A32', 'PAYMENT DETAILS', { size: 9, bold: true, color: { argb: C_GOLD } }, L);
+  const payLines = [];
+  if (co.bankName) payLines.push('Bank: ' + co.bankName);
+  if (co.bankAccName) payLines.push('Account Name: ' + co.bankAccName);
+  if (co.bankAccNo) payLines.push('Account No.: ' + co.bankAccNo);
+  if (co.paynow) payLines.push('PayNow (UEN): ' + co.paynow);
+  payLines.forEach(function (t, i) {
+    set('A' + (33 + i), t, { size: 9, color: { argb: C_GREY } }, L);
+  });
+
+  // Related-party note — only when the client matches the configured trigger
+  if (noteTriggered(co, inv.client.name)) {
+    ws.mergeCells('A38:E38');
+    set('A38', co.noteText, { size: 8, italic: true, color: { argb: C_GREY } }, { horizontal: 'left', vertical: 'top', wrapText: true });
+    ws.getRow(38).height = 30;
+  }
+
+  // Thank you
+  set('A40', 'Thank you for your business.', { size: 9, italic: true, color: { argb: C_GOLD } }, L);
+
+  return wb.xlsx.writeBuffer();
 }
 
 /* ===================== Init ===================== */
