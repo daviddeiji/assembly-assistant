@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'assembly-v6';
+const CACHE = 'assembly-v7';
 
 const CORE = [
   './',

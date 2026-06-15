@@ -42,7 +42,8 @@ const GST_LABEL = { none: 'No GST', incl: 'Incl. ' + GST_RATE + '% GST', zero: '
 
 let state = load();
 let view = { tab: 'month', ym: thisYM(), query: '' };
-let persistAsked = false;
+let persistStatus = 'unknown'; // 'persisted' | 'denied' | 'unsupported' | 'unknown'
+let backupPromptShownThisSession = false;
 
 function load() {
   try {
@@ -62,10 +63,73 @@ function save() {
 }
 
 function requestPersist() {
-  if (!persistAsked && navigator.storage && navigator.storage.persist) {
-    persistAsked = true;
-    navigator.storage.persist().catch(function () {});
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist().then(function (g) { persistStatus = g ? 'persisted' : 'denied'; }).catch(function () {});
+  } else {
+    persistStatus = 'unsupported';
   }
+}
+
+function refreshPersistStatus(cb) {
+  if (navigator.storage && navigator.storage.persisted) {
+    navigator.storage.persisted().then(function (p) { persistStatus = p ? 'persisted' : 'denied'; if (cb) cb(); }).catch(function () { if (cb) cb(); });
+  } else {
+    persistStatus = 'unsupported';
+    if (cb) cb();
+  }
+}
+
+function requestPersistNow() {
+  if (!(navigator.storage && navigator.storage.persist)) { showSnack('Storage protection not available here'); return; }
+  navigator.storage.persist().then(function (g) {
+    persistStatus = g ? 'persisted' : 'denied';
+    showSnack(g ? 'Storage protected on this device' : 'Browser declined — keep backing up to a file');
+    if (view.tab === 'export') renderExport();
+  }).catch(function () {});
+}
+
+/* ---- Backup freshness tracking ---- */
+
+const BACKUP_FREQS = [
+  { d: 0, label: 'Every change' },
+  { d: 1, label: 'Daily' },
+  { d: 7, label: 'Weekly' },
+  { d: 30, label: 'Monthly' },
+];
+
+function hasUserData() {
+  return state.entries.length > 0 || state.invoices.length > 0 ||
+    state.clients.some(function (c) { return c.name && c.name.trim(); });
+}
+
+// Cheap fingerprint of the meaningful data (ignores settings/metadata) so we
+// know whether anything has actually changed since the last backup.
+function dataFingerprint() {
+  const s = JSON.stringify({ e: state.entries, i: state.invoices, c: state.clients });
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36) + '.' + s.length;
+}
+
+function backupDirty() { return dataFingerprint() !== (state.settings.backupFingerprint || ''); }
+
+function daysSinceBackup() {
+  const last = state.settings.lastBackup;
+  if (!last) return Infinity;
+  return Math.floor((Date.now() - new Date(last + 'T00:00:00').getTime()) / 86400000);
+}
+
+function backupIntervalDays() {
+  return state.settings.backupIntervalDays != null ? state.settings.backupIntervalDays : 7;
+}
+
+function backupDue() {
+  return hasUserData() && backupDirty() && daysSinceBackup() >= backupIntervalDays();
+}
+
+function markBackedUp() {
+  state.settings.lastBackup = todayISO();
+  state.settings.backupFingerprint = dataFingerprint();
 }
 
 /* ===================== Helpers ===================== */
@@ -181,14 +245,13 @@ function barsHTML(pairs) {
 }
 
 function backupBannerHTML() {
-  if (!state.entries.length) return '';
+  if (!hasUserData() || !backupDirty()) return '';
   const last = state.settings.lastBackup;
-  if (last) {
-    const days = Math.floor((Date.now() - new Date(last + 'T00:00:00').getTime()) / 86400000);
-    if (days < 14) return '';
-    return '<button class="banner" id="goExport">💾 Last backup was ' + days + ' days ago — tap to back up</button>';
-  }
-  return '<button class="banner" id="goExport">💾 No backup yet — tap to back up your data</button>';
+  const days = daysSinceBackup();
+  const msg = last
+    ? '💾 ' + days + ' day' + (days === 1 ? '' : 's') + ' since your last backup — tap to back up'
+    : '💾 No backup yet — tap to protect your data';
+  return '<button class="banner" id="goBackup">' + msg + '</button>';
 }
 
 function entryRowHTML(e) {
@@ -258,8 +321,8 @@ function renderMonth() {
 
   document.getElementById('prevM').onclick = function () { view.ym = shiftYM(view.ym, -1); render(); };
   document.getElementById('nextM').onclick = function () { view.ym = shiftYM(view.ym, 1); render(); };
-  const banner = document.getElementById('goExport');
-  if (banner) banner.onclick = function () { view.tab = 'export'; render(); };
+  const banner = document.getElementById('goBackup');
+  if (banner) banner.onclick = function () { openBackupPrompt(false); };
   wireEntryRows($view);
 }
 
@@ -304,8 +367,9 @@ function renderHistList() {
 /* ---------- Export ---------- */
 
 function renderExport() {
-  const last = state.settings.lastBackup;
   const none = state.entries.length === 0;
+  const noData = !hasUserData();
+  if (persistStatus === 'unknown') refreshPersistStatus(function () { if (view.tab === 'export') renderExport(); });
   $view.innerHTML =
     '<div class="card"><h3>Excel export</h3>' +
     '<p>One spreadsheet with every entry plus a month-by-month P&amp;L summary. Opens in Excel or Google Sheets.</p>' +
@@ -315,13 +379,15 @@ function renderExport() {
     '<p>A plain table of all entries — also opens in Excel.</p>' +
     '<button id="csvBtn" class="btn ghost"' + (none ? ' disabled' : '') + '>Download .csv</button></div>' +
 
-    '<div class="card"><h3>Backup &amp; restore</h3>' +
-    '<p>Your data lives only on this device. The backup file restores everything if you switch phones or clear Chrome’s data.<br><b>Last backup:</b> ' + (last ? fmtDate(last) : 'never') + '</p>' +
-    '<button id="backupBtn" class="btn"' + (none ? ' disabled' : '') + '>Download backup</button>' +
+    '<div class="card"><h3>Backup &amp; data safety</h3>' +
+    backupStatusHTML() +
+    '<button id="backupBtn" class="btn"' + (noData ? ' disabled' : '') + '>Download backup now</button>' +
     '<button id="restoreBtn" class="btn ghost">Restore from file</button>' +
-    '<input type="file" id="restoreFile" accept="application/json,.json" hidden></div>' +
+    '<input type="file" id="restoreFile" accept="application/json,.json" hidden>' +
+    '<div class="field" style="margin-top:16px"><span>Remind me to back up</span><div class="chips" id="freqChips"></div></div>' +
+    '</div>' +
 
-    '<p class="fineprint">Tip: back up at least every two weeks. The file lands in your Downloads folder — keep a copy in Google Drive or email it to yourself.</p>';
+    '<p class="fineprint">Backups land in your Downloads folder — keep a copy in Google Drive or email it to yourself, so a lost or wiped phone can’t take your records with it.</p>';
 
   document.getElementById('xlsxBtn').onclick = exportXlsx;
   document.getElementById('csvBtn').onclick = exportCsv;
@@ -329,6 +395,79 @@ function renderExport() {
   const fileInput = document.getElementById('restoreFile');
   document.getElementById('restoreBtn').onclick = function () { fileInput.click(); };
   fileInput.onchange = function () { restoreBackup(fileInput.files[0]); fileInput.value = ''; };
+  wireBackupControls($view);
+}
+
+function backupStatusHTML() {
+  const last = state.settings.lastBackup;
+  let dataMsg;
+  if (!hasUserData()) dataMsg = 'No data to back up yet.';
+  else if (!last) dataMsg = '<span class="warn">No backup yet — your data exists only on this device.</span>';
+  else if (backupDirty()) dataMsg = '<b>Last backup:</b> ' + fmtDate(last) + ' · <span class="warn">new changes not backed up</span>';
+  else dataMsg = '<b>Last backup:</b> ' + fmtDate(last) + ' · <span class="ok">up to date ✓</span>';
+
+  let store;
+  if (persistStatus === 'persisted') store = '<span class="ok">✓ Storage protected</span> — the browser won’t auto-clear your data.';
+  else if (persistStatus === 'denied') store = '<span class="warn">⚠ Storage not protected.</span> <button class="linkbtn" id="protectBtn">Protect it</button>';
+  else if (persistStatus === 'unsupported') store = 'Automatic storage protection isn’t available in this browser.';
+  else store = 'Checking storage protection…';
+
+  return '<p>' + dataMsg + '</p><p class="fineprint">' + store + '</p>';
+}
+
+function wireBackupControls(root) {
+  const protect = root.querySelector('#protectBtn');
+  if (protect) protect.onclick = requestPersistNow;
+  const freq = root.querySelector('#freqChips');
+  if (freq) {
+    const cur = backupIntervalDays();
+    freq.innerHTML = BACKUP_FREQS.map(function (f) {
+      return '<button class="chip' + (f.d === cur ? ' on' : '') + '" data-d="' + f.d + '">' + f.label + '</button>';
+    }).join('');
+    freq.querySelectorAll('.chip').forEach(function (b) {
+      b.onclick = function () {
+        state.settings.backupIntervalDays = +b.dataset.d;
+        save();
+        freq.querySelectorAll('.chip').forEach(function (x) { x.classList.toggle('on', +x.dataset.d === +b.dataset.d); });
+      };
+    });
+  }
+}
+
+// Automatic, attention-grabbing prompt shown on launch when a backup is overdue.
+function openBackupPrompt(auto) {
+  const last = state.settings.lastBackup;
+  const days = daysSinceBackup();
+  const since = !last ? 'never' : (days === 0 ? 'today' : days + ' day' + (days === 1 ? '' : 's') + ' ago');
+  $sheet.innerHTML =
+    '<div class="sheet-inner">' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>Back up your data</h2></div>' +
+    '<p>Everything in this app is stored only on this phone. A backup file is your safety net if the phone is lost or replaced, or the browser’s data gets cleared.</p>' +
+    '<div class="card"><p><b>Last backup:</b> ' + since +
+      (hasUserData() && backupDirty() ? ' · <span class="warn">changes not backed up</span>' : (last ? ' · <span class="ok">up to date ✓</span>' : '')) + '</p></div>' +
+    '<button class="btn big" id="bkNow">Back up now</button>' +
+    '<div class="field" style="margin-top:16px"><span>Remind me to back up</span><div class="chips" id="freqChips"></div></div>' +
+    '<p class="fineprint" id="storeLine"></p>' +
+    (auto ? '<button class="btn ghost big" id="bkLater">Not now</button>' : '') +
+    '</div>';
+  $sheet.classList.remove('hidden');
+  $sheet.scrollTop = 0;
+  const q = function (s) { return $sheet.querySelector(s); };
+  q('#closeSheet').onclick = closeSheet;
+  q('#bkNow').onclick = function () { downloadBackup(); closeSheet(); };
+  const later = q('#bkLater'); if (later) later.onclick = closeSheet;
+  q('#storeLine').innerHTML = persistStatus === 'persisted'
+    ? '✓ Storage protected on this device.'
+    : (persistStatus === 'denied' ? '⚠ <button class="linkbtn" id="protectBtn">Protect storage</button> so the browser can’t auto-clear it.' : '');
+  wireBackupControls($sheet);
+}
+
+function maybePromptBackup() {
+  if (backupPromptShownThisSession) return;
+  if (!$sheet.classList.contains('hidden')) return;
+  if (!backupDue()) return;
+  backupPromptShownThisSession = true;
+  openBackupPrompt(true);
 }
 
 function download(content, name, mime) {
@@ -414,10 +553,10 @@ function exportXlsx() {
 
 function downloadBackup() {
   download(JSON.stringify(state, null, 1), 'assembly-backup-' + todayISO() + '.json', 'application/json');
-  state.settings.lastBackup = todayISO();
+  markBackedUp();
   save();
-  renderExport();
-  showSnack('Backup downloaded');
+  if (view.tab === 'export') renderExport();
+  showSnack('Backup downloaded — save a copy to Drive or email');
 }
 
 function restoreBackup(file) {
@@ -432,15 +571,23 @@ function restoreBackup(file) {
     }
     const ok = confirm('Replace the ' + state.entries.length + ' entries on this device with the ' + data.entries.length + ' entries from the backup?');
     if (!ok) return;
+    const prev = JSON.parse(JSON.stringify(state));
     data.settings = data.settings || {};
     data.invoices = Array.isArray(data.invoices) ? data.invoices : [];
     data.clients = Array.isArray(data.clients) ? data.clients : [];
     state = data;
     ensureClientsSeed();
+    markBackedUp();
     save();
     view.ym = thisYM();
     render();
-    showSnack('Backup restored');
+    showSnack('Backup restored', function () {
+      state = prev;
+      save();
+      view.ym = thisYM();
+      render();
+      showSnack('Restore undone');
+    });
   };
   reader.readAsText(file);
 }
@@ -1330,7 +1477,10 @@ document.querySelectorAll('.tab').forEach(function (b) {
 document.getElementById('fab').onclick = function () { openSheet(); };
 
 ensureClientsSeed();
+requestPersist();
 render();
+refreshPersistStatus(function () { if (view.tab === 'export') renderExport(); });
+maybePromptBackup();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('./sw.js').catch(function () {});
