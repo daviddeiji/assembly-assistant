@@ -875,7 +875,7 @@ function openCompanyForm(thenNewInvoice) {
     '<h3 class="sec">Related-party note (optional)</h3>' +
     '<label class="field"><span>Note text — printed only for the client below</span>' +
     '<textarea id="cNote" class="li-desc" rows="3" placeholder="e.g. This invoice is issued under a related-party arrangement…">' + esc(c.noteText) + '</textarea></label>' +
-    field('Show note when client name contains', 'cNoteClient', c.noteClient, 'e.g. a client short-code') +
+    field('Show note when client name contains', 'cNoteClient', c.noteClient, 'A word from the client name as billed') +
     '<button class="btn big" id="saveCompany">Save company details</button>' +
     '</div>';
   $sheet.classList.remove('hidden');
@@ -1245,13 +1245,17 @@ function buildInvoiceWorkbook(inv) {
   set('D12', 'Due Date', lab, R); set('E12', fmtDate(inv.dueDate), val, R);
   set('D13', 'Terms', lab, R); set('E13', 'Net ' + inv.terms, val, R);
 
-  // Line-item header (row 17)
-  const head = { size: 9, bold: true, color: { argb: C_WHITE } };
-  set('A17', 'No.', head, M, C_INK);
-  set('B17', 'Description', head, L, C_INK);
-  set('C17', 'Qty', head, M, C_INK);
-  set('D17', 'Unit Price (SGD)', head, M, C_INK);
-  set('E17', 'Amount (SGD)', head, M, C_INK);
+  // Line-item header (row 17) — smaller font + wrap + taller row so the
+  // longer labels ("Unit Price (SGD)") never overflow their cells.
+  const head = { size: 8, bold: true, color: { argb: C_WHITE } };
+  const headC = { horizontal: 'center', vertical: 'middle', wrapText: true };
+  const headL = { horizontal: 'left', vertical: 'middle', wrapText: true };
+  set('A17', 'No.', head, headC, C_INK);
+  set('B17', 'Description', head, headL, C_INK);
+  set('C17', 'Qty', head, headC, C_INK);
+  set('D17', 'Unit Price (SGD)', head, headC, C_INK);
+  set('E17', 'Amount (SGD)', head, headC, C_INK);
+  ws.getRow(17).height = 26;
 
   // Item rows 18–25 (8 rows)
   for (let i = 0; i < 8; i++) {
@@ -1286,9 +1290,12 @@ function buildInvoiceWorkbook(inv) {
     set('D28', 'GST (not applicable)', lab, R);
     set('E28', 0, val, R, null, NUMFMT);
   }
-  const totFont = { size: 11, bold: true, color: { argb: C_WHITE } };
-  set('D29', 'TOTAL (SGD)', totFont, R, C_GOLD);
-  set('E29', undefined, totFont, R, C_GOLD, NUMFMT).value = { formula: 'E27+E28', result: +(inv.total / 100).toFixed(2) };
+  const totFont = { size: 10, bold: true, color: { argb: C_WHITE } };
+  const totAlign = { horizontal: 'right', vertical: 'middle' };
+  set('C29', undefined, null, null, C_GOLD); // extend gold band left so the label never spills onto white
+  set('D29', 'TOTAL (SGD)', totFont, totAlign, C_GOLD);
+  set('E29', undefined, totFont, totAlign, C_GOLD, NUMFMT).value = { formula: 'E27+E28', result: +(inv.total / 100).toFixed(2) };
+  ws.getRow(29).height = 22;
 
   // Footer — payment details (from on-device company settings)
   set('A32', 'PAYMENT DETAILS', { size: 9, bold: true, color: { argb: C_GOLD } }, L);
