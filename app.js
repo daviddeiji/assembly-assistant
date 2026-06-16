@@ -932,10 +932,15 @@ function openClientForm(existing) {
   q('#closeSheet').onclick = openClientsList;
   if (isEdit) {
     q('#delClient').onclick = function () {
+      const idx = state.clients.indexOf(existing);
       state.clients = state.clients.filter(function (x) { return x.id !== existing.id; });
       save();
       openClientsList();
-      showSnack('Client deleted');
+      showSnack('Client deleted', function () {
+        state.clients.splice(idx < 0 ? state.clients.length : Math.min(idx, state.clients.length), 0, existing);
+        save();
+        openClientsList();
+      });
     };
   }
   q('#saveClient').onclick = function () {
