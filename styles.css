@@ -129,6 +129,8 @@ h3.sec {
 .entry-title { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .entry-sub { font-size: 13px; color: var(--muted); }
 .entry-amt { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.entry.void .entry-title, .entry.void .entry-amt { color: var(--muted); text-decoration: line-through; }
+.void-badge { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; font-size: 11px; letter-spacing: 1px; color: #fff; background: var(--red); padding: 2px 7px; border-radius: 6px; vertical-align: middle; }
 
 /* ---------- Banner ---------- */
 .banner {
@@ -270,6 +272,7 @@ textarea.li-desc { font-family: inherit; resize: vertical; min-height: 76px; }
   font-weight: 600;
 }
 .btn.ghost { background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
+.btn.danger { background: var(--panel); color: var(--red); border: 1px solid var(--red); }
 .btn.big { width: 100%; padding: 18px; font-size: 18px; border-radius: 14px; margin-top: 8px; }
 .btn:disabled { opacity: .45; cursor: default; }
 

@@ -962,8 +962,9 @@ function openClientForm(existing) {
 /* ---------- Invoice tab ---------- */
 
 function invRowHTML(inv) {
-  return '<button class="entry" data-inv="' + inv.id + '">' +
-    '<span class="entry-main"><span class="entry-title">' + esc(inv.number) + ' · ' + esc(inv.client.name) + '</span>' +
+  const isVoid = inv.status === 'void';
+  return '<button class="entry' + (isVoid ? ' void' : '') + '" data-inv="' + inv.id + '">' +
+    '<span class="entry-main"><span class="entry-title">' + esc(inv.number) + ' · ' + esc(inv.client.name) + (isVoid ? ' · VOID' : '') + '</span>' +
     '<span class="entry-sub">' + esc(fmtDate(inv.date)) + (inv.gstMode === 'registered' ? ' · GST' : '') + '</span></span>' +
     '<span class="entry-amt">' + fmtMoney(inv.total) + '</span>' +
     '</button>';
@@ -1055,9 +1056,12 @@ function openCompanyForm(thenNewInvoice) {
 function openInvoiceForm(prefill) {
   // No prefill given → start from the most recent invoice (handy for a recurring
   // monthly retainer). The very first invoice starts blank.
-  if (!prefill && state.invoices.length) {
-    const last = state.invoices.slice().sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); })[0];
-    prefill = { client: last.client, lineItems: last.lineItems, gstMode: last.gstMode, terms: last.terms };
+  if (!prefill) {
+    const actives = state.invoices.filter(function (i) { return i.status !== 'void'; });
+    if (actives.length) {
+      const last = actives.sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); })[0];
+      prefill = { client: last.client, lineItems: last.lineItems, gstMode: last.gstMode, terms: last.terms };
+    }
   }
   const base = prefill || {};
   const client = Object.assign({ name: '', uen: '', addr1: '', addr2: '', attn: '' }, base.client || {});
@@ -1259,11 +1263,13 @@ function openInvoiceView(inv) {
   const lines = inv.lineItems.map(function (it, i) {
     return '<div class="pnl-row"><span>' + esc(it.desc || '(item ' + (i + 1) + ')') + ' × ' + esc(it.qty) + '</span><span>' + fmtMoney(Math.round(it.qty * it.unitPrice)) + '</span></div>';
   }).join('');
+  const isVoid = inv.status === 'void';
   $sheet.innerHTML =
     '<div class="sheet-inner">' +
-    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>' + esc(inv.number) + '</h2></div>' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>' + esc(inv.number) + (isVoid ? ' <span class="void-badge">VOID</span>' : '') + '</h2></div>' +
     '<div class="card"><h3>' + esc(inv.client.name) + '</h3>' +
-    '<p>' + esc(fmtDate(inv.date)) + ' · Due ' + esc(fmtDate(inv.dueDate)) + ' · Net ' + inv.terms + '</p></div>' +
+    '<p>' + esc(fmtDate(inv.date)) + ' · Due ' + esc(fmtDate(inv.dueDate)) + ' · Net ' + inv.terms + '</p>' +
+    (isVoid ? '<p class="warn">Voided — removed from your P&amp;L. The number stays on record.</p>' : '') + '</div>' +
     '<h3 class="sec">Items</h3>' + lines +
     '<div class="inv-totals">' +
     '<div class="pnl-row"><span>Subtotal</span><span>' + fmtMoney(inv.subtotal) + '</span></div>' +
@@ -1271,7 +1277,15 @@ function openInvoiceView(inv) {
     '<div class="pnl-row net"><span>Total</span><span>' + fmtMoney(inv.total) + '</span></div></div>' +
     '<button class="btn big" id="reDl">Download .xlsx again</button>' +
     '<button class="btn ghost big" id="dupInv">Duplicate as new invoice</button>' +
-    '<p class="fineprint">Re-downloading does not log income again. Duplicating starts a new invoice with the next number.</p>' +
+    (isVoid
+      ? '<button class="btn ghost big" id="restoreInv">Restore (un-void)</button>'
+      : '<button class="btn danger big" id="voidInv">Void / cancel invoice</button>') +
+    '<button class="danger-link" id="delInv">Delete permanently</button>' +
+    '<p class="fineprint">' +
+    (isVoid
+      ? 'Restoring re-adds the income to your P&amp;L. '
+      : 'Voiding removes its income from your P&amp;L but keeps the invoice number on record (best for an invoice you already sent). ') +
+    'Deleting removes it and its income entirely — use it for a mistake. Both can be undone right after.</p>' +
     '</div>';
   $sheet.classList.remove('hidden');
   $sheet.scrollTop = 0;
@@ -1286,6 +1300,75 @@ function openInvoiceView(inv) {
   q('#dupInv').onclick = function () {
     openInvoiceForm({ client: inv.client, lineItems: inv.lineItems, gstMode: inv.gstMode, terms: inv.terms });
   };
+  if (isVoid) q('#restoreInv').onclick = function () { restoreInvoice(inv); };
+  else q('#voidInv').onclick = function () { voidInvoice(inv); };
+  q('#delInv').onclick = function () { deleteInvoice(inv); };
+}
+
+/* ---------- Void / delete an invoice with linked P&L cleanup ---------- */
+
+// Removes the income entry an invoice logged (if still present) and returns it
+// so the action can be undone.
+function removeLinkedEntry(inv) {
+  if (!inv.loggedEntryId) return null;
+  const e = state.entries.find(function (x) { return x.id === inv.loggedEntryId; });
+  if (e) state.entries = state.entries.filter(function (x) { return x.id !== inv.loggedEntryId; });
+  return e || null;
+}
+
+function voidInvoice(inv) {
+  const removed = removeLinkedEntry(inv);
+  const prevStatus = inv.status;
+  inv.status = 'void';
+  inv.voidedAt = Date.now();
+  save();
+  closeSheet();
+  render();
+  showSnack('Invoice voided — income removed from P&L', function () {
+    if (prevStatus) inv.status = prevStatus; else delete inv.status;
+    delete inv.voidedAt;
+    if (removed) state.entries.push(removed);
+    save();
+    render();
+  });
+}
+
+function deleteInvoice(inv) {
+  const removed = removeLinkedEntry(inv);
+  const idx = state.invoices.indexOf(inv);
+  state.invoices = state.invoices.filter(function (x) { return x.id !== inv.id; });
+  save();
+  closeSheet();
+  render();
+  showSnack('Invoice deleted', function () {
+    state.invoices.splice(idx < 0 ? state.invoices.length : Math.min(idx, state.invoices.length), 0, inv);
+    if (removed) state.entries.push(removed);
+    save();
+    render();
+  });
+}
+
+// Un-void: reconstruct the income entry from the invoice and re-add it to the P&L.
+function restoreInvoice(inv) {
+  if (inv.loggedEntryId && !state.entries.some(function (x) { return x.id === inv.loggedEntryId; })) {
+    state.entries.push({
+      id: inv.loggedEntryId,
+      type: 'income',
+      date: inv.date,
+      desc: 'Invoice ' + inv.number,
+      client: inv.client.name,
+      category: noteTriggered(getCompany(), inv.client.name) ? 'Retainer income' : 'Other income',
+      gst: inv.gstMode === 'registered' ? 'incl' : 'none',
+      amountCents: inv.total,
+      createdAt: Date.now(),
+    });
+  }
+  delete inv.status;
+  delete inv.voidedAt;
+  save();
+  closeSheet();
+  render();
+  showSnack('Invoice restored — income added back');
 }
 
 /* ---------- Generate: build file, download, log income, persist ---------- */
