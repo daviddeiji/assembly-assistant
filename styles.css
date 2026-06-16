@@ -308,3 +308,35 @@ textarea.li-desc { font-family: inherit; resize: vertical; min-height: 76px; }
   font-size: 15px;
 }
 .snackbar button { background: none; border: none; color: var(--gold); font-weight: 700; font-size: 15px; padding: 4px 8px; }
+
+/* ---------- Module shell + launcher ---------- */
+.home-btn { background: none; border: none; color: var(--gold); font-size: 24px; font-weight: 700; line-height: 1; padding: 0 10px 0 0; }
+.launcher { padding-top: 6px; }
+.launcher-intro { text-align: center; color: var(--muted); font-size: 14px; margin: 10px 0 18px; }
+.module-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.module-card { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px 16px; text-align: left; min-height: 132px; }
+.module-icon { font-family: var(--serif); font-size: 24px; color: var(--gold); font-weight: 700; }
+.module-title { font-family: var(--serif); font-size: 17px; color: var(--ink); font-weight: 600; }
+.module-desc { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.module-card.soon { opacity: .5; }
+.module-soon { font-size: 11px; color: var(--gold); font-weight: 600; margin-top: auto; }
+
+/* ---------- Today/Tasks status badges ---------- */
+.badge.today { background: #faf3dc; color: #8a6d10; }
+.badge.soon { background: #eef1f4; color: #5a6470; }
+.badge.done { background: #e3f3ec; color: var(--green); }
+
+/* ---------- Reminders ---------- */
+.rem-row { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-bottom: 8px; }
+.rem-main { flex: 1; min-width: 0; background: none; border: none; text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 0; }
+.rem-main .entry-title { font-size: 16px; }
+.rem-row.off .rem-main { opacity: .5; }
+.toggle { flex: none; min-width: 54px; padding: 8px 12px; border-radius: 20px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); font-weight: 600; font-size: 13px; }
+.toggle.on { background: var(--green); color: #fff; border-color: var(--green); }
+
+/* ---------- Checklist ---------- */
+.cl-item { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.cl-check { flex: none; width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--green); font-size: 16px; font-weight: 700; }
+.cl-check.on { background: var(--green); color: #fff; border-color: var(--green); }
+.cl-text { flex: 1; min-width: 0; box-sizing: border-box; padding: 10px; font-size: 15px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
+.cl-del { flex: none; width: 34px; height: 34px; border: none; background: none; color: var(--red); font-size: 15px; }

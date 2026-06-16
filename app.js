@@ -41,7 +41,7 @@ const GST_LABEL = { none: 'No GST', incl: 'Incl. ' + GST_RATE + '% GST', zero: '
 /* ===================== State ===================== */
 
 let state = load();
-let view = { tab: 'month', ym: thisYM(), query: '' };
+let view = { module: null, tab: null, ym: thisYM(), query: '' };
 let persistStatus = 'unknown'; // 'persisted' | 'denied' | 'unsupported' | 'unknown'
 let backupPromptShownThisSession = false;
 
@@ -52,10 +52,12 @@ function load() {
       d.settings = d.settings || {};
       d.invoices = Array.isArray(d.invoices) ? d.invoices : [];
       d.clients = Array.isArray(d.clients) ? d.clients : [];
+      d.tasks = Array.isArray(d.tasks) ? d.tasks : [];
+      d.reminders = Array.isArray(d.reminders) ? d.reminders : [];
       return d;
     }
   } catch (err) { /* corrupt data — start fresh, backups are the safety net */ }
-  return { version: 1, entries: [], invoices: [], clients: [], settings: {} };
+  return { version: 1, entries: [], invoices: [], clients: [], tasks: [], reminders: [], settings: {} };
 }
 
 function save() {
@@ -99,13 +101,15 @@ const BACKUP_FREQS = [
 
 function hasUserData() {
   return state.entries.length > 0 || state.invoices.length > 0 ||
-    state.clients.some(function (c) { return c.name && c.name.trim(); });
+    state.clients.some(function (c) { return c.name && c.name.trim(); }) ||
+    state.tasks.length > 0 ||
+    state.reminders.some(function (r) { return !r.builtin; });
 }
 
 // Cheap fingerprint of the meaningful data (ignores settings/metadata) so we
 // know whether anything has actually changed since the last backup.
 function dataFingerprint() {
-  const s = JSON.stringify({ e: state.entries, i: state.invoices, c: state.clients });
+  const s = JSON.stringify({ e: state.entries, i: state.invoices, c: state.clients, t: state.tasks, r: state.reminders });
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
   return h.toString(36) + '.' + s.length;
@@ -208,14 +212,112 @@ function hideSnack() { $snack.classList.add('hidden'); }
 
 const $view = document.getElementById('view');
 
+/* ===================== Module shell ===================== */
+
+const MODULES = {
+  accountant: { label: 'Accounts', defaultTab: 'month', tabs: [['month', 'Month'], ['history', 'History'], ['invoice', 'Invoice'], ['export', 'Export']] },
+  admin: { label: 'Admin', defaultTab: 'today', tabs: [['today', 'Today'], ['tasks', 'Tasks'], ['reminders', 'Reminders'], ['contacts', 'Contacts']] },
+};
+
+const MODULE_CARDS = [
+  { id: 'admin', title: 'Admin', desc: 'Client jobs, reminders, contacts', icon: '✓', available: true },
+  { id: 'accountant', title: 'Accountant', desc: 'Income, expenses, invoices, P&L', icon: 'S$', available: true },
+  { id: 'pa', title: 'Personal Assistant', desc: 'Daily agenda & meeting notes', icon: '◷', available: false },
+  { id: 'researcher', title: 'Researcher', desc: 'Saved links & AI summaries', icon: '⌕', available: false },
+];
+
+function enterModule(id) {
+  view.module = id;
+  view.tab = MODULES[id].defaultTab;
+  render();
+}
+
+function goHome() { view.module = null; view.tab = null; render(); }
+
 function render() {
-  document.querySelectorAll('.tab').forEach(function (b) {
-    b.classList.toggle('active', b.dataset.tab === view.tab);
+  const home = document.getElementById('homeBtn');
+  const label = document.getElementById('moduleLabel');
+  const tabbar = document.getElementById('tabbar');
+  const fab = document.getElementById('fab');
+
+  if (!view.module) {
+    home.classList.add('hidden');
+    label.textContent = '';
+    tabbar.classList.add('hidden');
+    fab.classList.add('hidden');
+    renderLauncher();
+    return;
+  }
+
+  const mod = MODULES[view.module];
+  home.classList.remove('hidden');
+  label.textContent = mod.label;
+  tabbar.classList.remove('hidden');
+  renderTabbar(mod);
+  updateFab();
+
+  if (view.module === 'accountant') {
+    if (view.tab === 'month') renderMonth();
+    else if (view.tab === 'history') renderHistory();
+    else if (view.tab === 'invoice') renderInvoiceTab();
+    else renderExport();
+  } else if (view.module === 'admin') {
+    if (view.tab === 'today') renderToday();
+    else if (view.tab === 'tasks') renderTasksTab();
+    else if (view.tab === 'reminders') renderRemindersTab();
+    else renderContactsTab();
+  }
+}
+
+function renderTabbar(mod) {
+  const bar = document.getElementById('tabbar');
+  bar.innerHTML = mod.tabs.map(function (t) {
+    return '<button class="tab' + (t[0] === view.tab ? ' active' : '') + '" data-tab="' + t[0] + '">' + t[1] + '</button>';
+  }).join('');
+  bar.querySelectorAll('.tab').forEach(function (b) {
+    b.onclick = function () { view.tab = b.dataset.tab; render(); };
   });
-  if (view.tab === 'month') renderMonth();
-  else if (view.tab === 'history') renderHistory();
-  else if (view.tab === 'invoice') renderInvoiceTab();
-  else renderExport();
+}
+
+function updateFab() {
+  const fab = document.getElementById('fab');
+  let label = '', action = null;
+  if (view.module === 'accountant') { label = 'Add entry'; action = function () { openSheet(); }; }
+  else if (view.module === 'admin') {
+    if (view.tab === 'reminders') { label = 'Add reminder'; action = function () { openReminderForm(null); }; }
+    else if (view.tab === 'contacts') { label = 'Add contact'; action = function () { openClientForm(null, backToTab); }; }
+    else { label = 'Add task'; action = function () { openTaskForm(null); }; }
+  }
+  if (action) {
+    fab.classList.remove('hidden');
+    fab.setAttribute('aria-label', label);
+    fab.onclick = action;
+  } else {
+    fab.classList.add('hidden');
+  }
+}
+
+// Re-render the current tab after a sheet closes (used as a "back" callback).
+function backToTab() { closeSheet(); render(); }
+
+function renderLauncher() {
+  const html = '<div class="launcher">' +
+    '<p class="launcher-intro">Your business assistant — choose a module</p>' +
+    '<div class="module-grid">' +
+    MODULE_CARDS.map(function (m) {
+      return '<button class="module-card' + (m.available ? '' : ' soon') + '"' +
+        (m.available ? ' data-mod="' + m.id + '"' : ' disabled') + '>' +
+        '<span class="module-icon">' + esc(m.icon) + '</span>' +
+        '<span class="module-title">' + esc(m.title) + '</span>' +
+        '<span class="module-desc">' + esc(m.desc) + '</span>' +
+        (m.available ? '' : '<span class="module-soon">Coming soon</span>') +
+        '</button>';
+    }).join('') +
+    '</div></div>';
+  $view.innerHTML = html;
+  $view.querySelectorAll('.module-card[data-mod]').forEach(function (b) {
+    b.onclick = function () { enterModule(b.dataset.mod); };
+  });
 }
 
 /* ---------- Month (P&L) ---------- */
@@ -575,8 +677,11 @@ function restoreBackup(file) {
     data.settings = data.settings || {};
     data.invoices = Array.isArray(data.invoices) ? data.invoices : [];
     data.clients = Array.isArray(data.clients) ? data.clients : [];
+    data.tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    data.reminders = Array.isArray(data.reminders) ? data.reminders : [];
     state = data;
     ensureClientsSeed();
+    ensureRemindersSeed();
     markBackedUp();
     save();
     view.ym = thisYM();
@@ -872,15 +977,18 @@ function sortedClients() {
   return state.clients.slice().sort(function (a, b) { return (a.ref || 0) - (b.ref || 0); });
 }
 
+function kindLabel(k) { return k === 'vendor' ? 'Vendor' : (k === 'both' ? 'Client/Vendor' : 'Client'); }
+
 function clientRowHTML(c) {
   const sub = [];
-  if (c.uen) sub.push(c.uen);
-  sub.push('Net ' + (c.terms != null ? c.terms : 30));
+  if (c.company) sub.push(c.company);
+  if (c.phone) sub.push(c.phone);
   if (!(c.name && c.name.trim())) sub.push('unnamed');
+  if (!sub.length) sub.push('Net ' + (c.terms != null ? c.terms : 30));
   return '<button class="entry" data-client="' + c.id + '">' +
     '<span class="entry-main"><span class="entry-title">' + esc(clientLabel(c)) + '</span>' +
     '<span class="entry-sub">' + esc(sub.join(' · ')) + '</span></span>' +
-    '<span class="entry-amt" style="font-size:12px;color:var(--muted);font-weight:600">' + esc(clientRef(c)) + '</span>' +
+    '<span class="entry-amt" style="font-size:11px;color:var(--muted);font-weight:600">' + esc(kindLabel(c.kind)) + '</span>' +
     '</button>';
 }
 
@@ -908,47 +1016,64 @@ function openClientsList() {
   });
 }
 
-function openClientForm(existing) {
+// Contact editor — shared by the invoicing "Clients" list and the Admin
+// "Contacts" tab. `back` is the callback used to return after save/delete/close.
+function openClientForm(existing, back) {
+  back = back || openClientsList;
   const isEdit = !!existing;
-  const c = existing || { name: '', uen: '', addr1: '', addr2: '', attn: '', terms: 30 };
+  const c = existing || { name: '', kind: 'client', company: '', uen: '', addr1: '', addr2: '', attn: '', phone: '', email: '', notes: '', terms: 30 };
+  let kind = c.kind || 'client';
   const refLabel = isEdit ? clientRef(existing) : ('Client #' + String((state.settings.clientSeq || 0) + 1).padStart(3, '0'));
   $sheet.innerHTML =
     '<div class="sheet-inner">' +
     '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button>' +
-    '<h2>' + (isEdit ? 'Edit client' : 'New client') + '</h2>' +
+    '<h2>' + (isEdit ? 'Edit contact' : 'New contact') + '</h2>' +
     (isEdit ? '<button class="danger-link" id="delClient">Delete</button>' : '') + '</div>' +
+    '<div class="field"><span>Type</span><div class="seg" id="kindSeg">' +
+    '<button data-k="client"' + (kind === 'client' ? ' class="on"' : '') + '>Client</button>' +
+    '<button data-k="vendor"' + (kind === 'vendor' ? ' class="on"' : '') + '>Vendor</button>' +
+    '<button data-k="both"' + (kind === 'both' ? ' class="on"' : '') + '>Both</button>' +
+    '</div></div>' +
     '<p class="fineprint">Reference: <b>' + esc(refLabel) + '</b> — used until you enter a name.</p>' +
-    field('Client name', 'kName', c.name, 'Leave blank to use ' + refLabel) +
+    field('Name', 'kName', c.name, 'Leave blank to use ' + refLabel) +
+    field('Company (optional)', 'kCompany', c.company, 'Company / organisation') +
+    field('Phone', 'kPhone', c.phone, 'Mobile or office') +
+    field('Email', 'kEmail', c.email, 'name@company.com') +
     field('UEN', 'kUen', c.uen, 'Registration no.') +
     field('Address line 1', 'kAddr1', c.addr1, 'Street, unit') +
     field('Address line 2', 'kAddr2', c.addr2, 'Postal / country') +
     field('Attention (optional)', 'kAttn', c.attn, 'Contact person') +
     field('Default payment terms (days)', 'kTerms', String(c.terms != null ? c.terms : 30), '30') +
-    '<button class="btn big" id="saveClient">Save client</button>' +
+    '<label class="field"><span>Notes</span><textarea id="kNotes" class="li-desc" rows="3" placeholder="Anything to remember">' + esc(c.notes || '') + '</textarea></label>' +
+    '<button class="btn big" id="saveClient">Save contact</button>' +
     '</div>';
   $sheet.classList.remove('hidden');
   $sheet.scrollTop = 0;
   const q = function (s) { return $sheet.querySelector(s); };
-  q('#closeSheet').onclick = openClientsList;
+  q('#closeSheet').onclick = back;
+  q('#kindSeg').querySelectorAll('button').forEach(function (b) {
+    b.onclick = function () { kind = b.dataset.k; q('#kindSeg').querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x.dataset.k === kind); }); };
+  });
   if (isEdit) {
     q('#delClient').onclick = function () {
       const idx = state.clients.indexOf(existing);
       state.clients = state.clients.filter(function (x) { return x.id !== existing.id; });
       save();
-      openClientsList();
-      showSnack('Client deleted', function () {
+      back();
+      showSnack('Contact deleted', function () {
         state.clients.splice(idx < 0 ? state.clients.length : Math.min(idx, state.clients.length), 0, existing);
         save();
-        openClientsList();
+        back();
       });
     };
   }
   q('#saveClient').onclick = function () {
     const t = parseInt(q('#kTerms').value, 10);
     const obj = {
-      name: q('#kName').value.trim(), uen: q('#kUen').value.trim(),
-      addr1: q('#kAddr1').value.trim(), addr2: q('#kAddr2').value.trim(),
-      attn: q('#kAttn').value.trim(), terms: isNaN(t) ? 30 : t,
+      name: q('#kName').value.trim(), kind: kind, company: q('#kCompany').value.trim(),
+      phone: q('#kPhone').value.trim(), email: q('#kEmail').value.trim(),
+      uen: q('#kUen').value.trim(), addr1: q('#kAddr1').value.trim(), addr2: q('#kAddr2').value.trim(),
+      attn: q('#kAttn').value.trim(), notes: q('#kNotes').value.trim(), terms: isNaN(t) ? 30 : t,
     };
     if (isEdit) {
       const i = state.clients.findIndex(function (x) { return x.id === existing.id; });
@@ -959,8 +1084,8 @@ function openClientForm(existing) {
     }
     save();
     requestPersist();
-    openClientsList();
-    showSnack('Client saved');
+    back();
+    showSnack('Contact saved');
   };
 }
 
@@ -1592,18 +1717,406 @@ function buildInvoiceWorkbook(inv) {
   return wb.xlsx.writeBuffer();
 }
 
+/* ===================== Admin module ===================== */
+
+const TASK_STATUS = { todo: 'To-do', doing: 'Doing', done: 'Done' };
+const FREQ_LABEL = { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly', quarterly: 'Quarterly', yearly: 'Yearly' };
+const REMINDER_FREQS = [['daily', 'Daily'], ['weekly', 'Weekly'], ['monthly', 'Monthly'], ['quarterly', 'Quarterly'], ['yearly', 'Yearly']];
+
+let contactFilter = 'all';
+
+function contactById(id) { return state.clients.find(function (c) { return c.id === id; }); }
+function contactName(id) { const c = contactById(id); return c ? clientLabel(c) : ''; }
+
+function isoYMD(y, m, d) { return y + '-' + String(m + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0'); }
+function daysInMonth(y, m) { return new Date(y, m + 1, 0).getDate(); }
+
+function nextDayOfMonth(dom) {
+  const now = new Date();
+  let y = now.getFullYear(), m = now.getMonth();
+  if (now.getDate() >= dom) { m++; if (m > 11) { m = 0; y++; } }
+  return isoYMD(y, m, Math.min(dom, daysInMonth(y, m)));
+}
+
+function advanceDate(iso, freq) {
+  const p = iso.split('-');
+  let y = +p[0], m = +p[1] - 1, d = +p[2];
+  if (freq === 'daily') return addDays(iso, 1);
+  if (freq === 'weekly') return addDays(iso, 7);
+  const addM = freq === 'monthly' ? 1 : (freq === 'quarterly' ? 3 : 0);
+  const addY = freq === 'yearly' ? 1 : 0;
+  m += addM; y += addY;
+  while (m > 11) { m -= 12; y++; }
+  return isoYMD(y, m, Math.min(d, daysInMonth(y, m)));
+}
+
+// Pre-load the Singapore business reminders once (generic names — no client
+// name hardcoded). Toggle/edit on-device.
+function ensureRemindersSeed() {
+  if (state.settings.remindersSeeded) return;
+  state.settings.remindersSeeded = true;
+  if (!state.reminders.length) {
+    const y = new Date().getFullYear();
+    [
+      { title: 'CPF payment', freq: 'monthly', enabled: true, nextDue: nextDayOfMonth(14), notes: 'CPF contributions due by the 14th of the month.' },
+      { title: 'GST filing', freq: 'quarterly', enabled: false, nextDue: nextDayOfMonth(1), notes: 'Only applies once GST-registered.' },
+      { title: 'Monthly retainer invoice', freq: 'monthly', enabled: true, nextDue: nextDayOfMonth(1), notes: 'Send the monthly retainer invoice.' },
+      { title: 'ACRA annual return', freq: 'yearly', enabled: true, nextDue: isoYMD(y + 1, 0, 31), notes: 'File the annual return with ACRA.' },
+    ].forEach(function (r) {
+      state.reminders.push(Object.assign({ id: uid(), builtin: true, createdAt: Date.now() }, r));
+    });
+  }
+  save();
+}
+
+/* ---------- Date-status badges (shared by Today / Tasks) ---------- */
+
+function dueLabel(date) {
+  const today = todayISO();
+  if (date < today) return 'OVERDUE';
+  if (date === today) return 'TODAY';
+  const days = Math.round((new Date(date + 'T00:00:00').getTime() - new Date(today + 'T00:00:00').getTime()) / 86400000);
+  return 'in ' + days + 'd';
+}
+function dateClass(date) {
+  const today = todayISO();
+  if (date < today) return 'overdue';
+  if (date === today) return 'today';
+  return 'soon';
+}
+
+/* ---------- Today ---------- */
+
+function renderToday() {
+  const today = todayISO();
+  const in7 = addDays(today, 7);
+  const items = [];
+  state.tasks.forEach(function (t) { if (t.status !== 'done' && t.deadline) items.push({ date: t.deadline, type: 'task', obj: t }); });
+  state.reminders.forEach(function (r) { if (r.enabled && r.nextDue) items.push({ date: r.nextDue, type: 'reminder', obj: r }); });
+  items.sort(function (a, b) { return a.date.localeCompare(b.date); });
+
+  const buckets = [
+    ['Overdue', items.filter(function (i) { return i.date < today; })],
+    ['Today', items.filter(function (i) { return i.date === today; })],
+    ['Next 7 days', items.filter(function (i) { return i.date > today && i.date <= in7; })],
+    ['Later', items.filter(function (i) { return i.date > in7; }).slice(0, 25)],
+  ];
+
+  let html;
+  if (!items.length) {
+    html = '<div class="empty">Nothing due right now.<br>Add a task or switch on a reminder.</div>';
+  } else {
+    html = buckets.map(function (b) {
+      if (!b[1].length) return '';
+      return '<h3 class="sec">' + b[0] + '</h3>' + b[1].map(todayRowHTML).join('');
+    }).join('');
+  }
+  $view.innerHTML = html;
+  $view.querySelectorAll('.entry[data-task]').forEach(function (btn) {
+    btn.onclick = function () { const t = state.tasks.find(function (x) { return x.id === btn.dataset.task; }); if (t) openTaskForm(t); };
+  });
+  $view.querySelectorAll('.entry[data-reminder]').forEach(function (btn) {
+    btn.onclick = function () { const r = state.reminders.find(function (x) { return x.id === btn.dataset.reminder; }); if (r) openReminderForm(r); };
+  });
+}
+
+function todayRowHTML(item) {
+  const o = item.obj;
+  const badge = '<span class="badge ' + dateClass(item.date) + '">' + dueLabel(item.date) + '</span>';
+  if (item.type === 'task') {
+    const who = o.clientId ? contactName(o.clientId) : 'Internal';
+    return '<button class="entry" data-task="' + o.id + '">' +
+      '<span class="entry-main"><span class="entry-title">' + esc(o.title || '(untitled)') + '</span>' +
+      '<span class="entry-sub">' + esc(who) + ' · ' + esc(fmtDate(item.date)) + ' · ' + TASK_STATUS[o.status || 'todo'] + '</span></span>' +
+      badge + '</button>';
+  }
+  return '<button class="entry" data-reminder="' + o.id + '">' +
+    '<span class="entry-main"><span class="entry-title">🔔 ' + esc(o.title) + '</span>' +
+    '<span class="entry-sub">' + FREQ_LABEL[o.freq] + ' · ' + esc(fmtDate(item.date)) + '</span></span>' +
+    badge + '</button>';
+}
+
+/* ---------- Tasks (grouped by client) ---------- */
+
+function taskStatusBadge(t) {
+  if (t.status === 'done') return 'DONE';
+  if (t.deadline && t.deadline < todayISO()) return 'OVERDUE';
+  return t.status === 'doing' ? 'DOING' : 'TO-DO';
+}
+function taskStatusClass(t) {
+  if (t.status === 'done') return 'done';
+  if (t.deadline && t.deadline < todayISO()) return 'overdue';
+  return t.status === 'doing' ? 'today' : 'soon';
+}
+
+function taskRowHTML(t) {
+  const cl = t.checklist || [];
+  const prog = cl.length ? ' · ' + cl.filter(function (s) { return s.done; }).length + '/' + cl.length : '';
+  const sub = [];
+  if (t.deadline) sub.push(fmtDate(t.deadline));
+  sub.push(TASK_STATUS[t.status || 'todo'] + prog);
+  return '<button class="entry' + (t.status === 'done' ? ' void' : '') + '" data-task="' + t.id + '">' +
+    '<span class="entry-main"><span class="entry-title">' + esc(t.title || '(untitled)') + '</span>' +
+    '<span class="entry-sub">' + esc(sub.join(' · ')) + '</span></span>' +
+    '<span class="badge ' + taskStatusClass(t) + '">' + taskStatusBadge(t) + '</span></button>';
+}
+
+function renderTasksTab() {
+  const open = state.tasks.filter(function (t) { return t.status !== 'done'; });
+  const done = state.tasks.filter(function (t) { return t.status === 'done'; });
+  let html = '';
+  if (!state.tasks.length) {
+    html = '<div class="empty">No client jobs yet.<br>Tap <b>+</b> to add one.</div>';
+  } else {
+    const groups = {};
+    open.forEach(function (t) { const k = t.clientId || ''; (groups[k] = groups[k] || []).push(t); });
+    const keys = Object.keys(groups).sort(function (a, b) {
+      if (a === '') return 1;
+      if (b === '') return -1;
+      return (contactName(a) || '').localeCompare(contactName(b) || '');
+    });
+    keys.forEach(function (k) {
+      const label = k ? contactName(k) : 'Internal / unassigned';
+      html += '<h3 class="sec">' + esc(label) + '</h3>';
+      groups[k].sort(function (a, b) { return (a.deadline || '9999').localeCompare(b.deadline || '9999'); }).forEach(function (t) { html += taskRowHTML(t); });
+    });
+    if (!open.length) html += '<div class="empty">No open jobs — all done ✓</div>';
+    if (done.length) html += '<h3 class="sec">Done (' + done.length + ')</h3>' + done.slice(0, 25).map(taskRowHTML).join('');
+  }
+  $view.innerHTML = html;
+  $view.querySelectorAll('.entry[data-task]').forEach(function (btn) {
+    btn.onclick = function () { const t = state.tasks.find(function (x) { return x.id === btn.dataset.task; }); if (t) openTaskForm(t); };
+  });
+}
+
+function openTaskForm(existing) {
+  const isEdit = !!existing;
+  const t = existing || { title: '', clientId: '', deadline: '', status: 'todo', checklist: [], notes: '' };
+  let status = t.status || 'todo';
+  let checklist = (t.checklist || []).map(function (s) { return { id: s.id || uid(), text: s.text, done: !!s.done }; });
+  const contacts = sortedClients().filter(function (c) { return c.name && c.name.trim(); });
+
+  $sheet.innerHTML =
+    '<div class="sheet-inner">' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>' + (isEdit ? 'Edit job' : 'New job') + '</h2>' +
+    (isEdit ? '<button class="danger-link" id="delTask">Delete</button>' : '') + '</div>' +
+    field('Title', 'tTitle', t.title, 'What needs doing?') +
+    '<label class="field"><span>Client</span><select id="tClient">' +
+    '<option value="">— No client (internal) —</option>' +
+    contacts.map(function (c) { return '<option value="' + c.id + '"' + (c.id === t.clientId ? ' selected' : '') + '>' + esc(clientLabel(c)) + '</option>'; }).join('') +
+    '</select></label>' +
+    '<label class="field"><span>Deadline (optional)</span><input type="date" id="tDeadline" value="' + (t.deadline || '') + '"></label>' +
+    '<div class="field"><span>Status</span><div class="seg" id="tStatusSeg">' +
+    '<button data-s="todo"' + (status === 'todo' ? ' class="on"' : '') + '>To-do</button>' +
+    '<button data-s="doing"' + (status === 'doing' ? ' class="on"' : '') + '>Doing</button>' +
+    '<button data-s="done"' + (status === 'done' ? ' class="on"' : '') + '>Done</button>' +
+    '</div></div>' +
+    '<div class="field"><span>Checklist</span><div id="clBox"></div>' +
+    '<button class="btn ghost" id="addStep">+ Add sub-step</button></div>' +
+    '<label class="field"><span>Notes</span><textarea id="tNotes" class="li-desc" rows="3" placeholder="Anything to remember">' + esc(t.notes || '') + '</textarea></label>' +
+    '<button class="btn big" id="saveTask">Save job</button>' +
+    '</div>';
+  $sheet.classList.remove('hidden');
+  $sheet.scrollTop = 0;
+  const q = function (s) { return $sheet.querySelector(s); };
+  q('#closeSheet').onclick = backToTab;
+
+  function readChecklist() {
+    $sheet.querySelectorAll('.cl-text').forEach(function (inp) { checklist[+inp.dataset.ci].text = inp.value; });
+  }
+  function renderChecklist() {
+    q('#clBox').innerHTML = checklist.map(function (s, i) {
+      return '<div class="cl-item">' +
+        '<button class="cl-check' + (s.done ? ' on' : '') + '" data-ci="' + i + '" aria-label="Toggle step">' + (s.done ? '✓' : '') + '</button>' +
+        '<input class="cl-text" data-ci="' + i + '" value="' + esc(s.text) + '" placeholder="Sub-step">' +
+        '<button class="cl-del" data-ci="' + i + '" aria-label="Remove step">✕</button>' +
+        '</div>';
+    }).join('');
+    q('#clBox').querySelectorAll('.cl-check').forEach(function (b) {
+      b.onclick = function () { readChecklist(); const i = +b.dataset.ci; checklist[i].done = !checklist[i].done; renderChecklist(); };
+    });
+    q('#clBox').querySelectorAll('.cl-del').forEach(function (b) {
+      b.onclick = function () { readChecklist(); checklist.splice(+b.dataset.ci, 1); renderChecklist(); };
+    });
+  }
+  renderChecklist();
+
+  q('#addStep').onclick = function () { readChecklist(); checklist.push({ id: uid(), text: '', done: false }); renderChecklist(); const inputs = $sheet.querySelectorAll('.cl-text'); if (inputs.length) inputs[inputs.length - 1].focus(); };
+  q('#tStatusSeg').querySelectorAll('button').forEach(function (b) {
+    b.onclick = function () { status = b.dataset.s; q('#tStatusSeg').querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x.dataset.s === status); }); };
+  });
+
+  if (isEdit) {
+    q('#delTask').onclick = function () {
+      const idx = state.tasks.indexOf(existing);
+      state.tasks = state.tasks.filter(function (x) { return x.id !== existing.id; });
+      save();
+      backToTab();
+      showSnack('Job deleted', function () {
+        state.tasks.splice(idx < 0 ? state.tasks.length : Math.min(idx, state.tasks.length), 0, existing);
+        save();
+        backToTab();
+      });
+    };
+  }
+
+  q('#saveTask').onclick = function () {
+    readChecklist();
+    const title = q('#tTitle').value.trim();
+    if (!title) { q('#tTitle').focus(); showSnack('Give the job a title'); return; }
+    const obj = {
+      title: title,
+      clientId: q('#tClient').value,
+      deadline: q('#tDeadline').value || '',
+      status: status,
+      checklist: checklist.filter(function (s) { return s.text.trim(); }),
+      notes: q('#tNotes').value.trim(),
+    };
+    if (status === 'done') obj.doneAt = (existing && existing.doneAt) || Date.now();
+    if (isEdit) {
+      const i = state.tasks.findIndex(function (x) { return x.id === existing.id; });
+      if (i !== -1) state.tasks[i] = Object.assign({}, existing, obj);
+    } else {
+      state.tasks.push(Object.assign({ id: uid(), createdAt: Date.now() }, obj));
+    }
+    save();
+    requestPersist();
+    backToTab();
+    showSnack('Job saved');
+  };
+}
+
+/* ---------- Reminders ---------- */
+
+function reminderRowHTML(r) {
+  return '<div class="rem-row' + (r.enabled ? '' : ' off') + '">' +
+    '<button class="rem-main" data-rem="' + r.id + '">' +
+    '<span class="entry-title">' + esc(r.title) + '</span>' +
+    '<span class="entry-sub">' + FREQ_LABEL[r.freq] + (r.enabled && r.nextDue ? ' · next ' + esc(fmtDate(r.nextDue)) : '') + '</span></button>' +
+    '<button class="toggle' + (r.enabled ? ' on' : '') + '" data-toggle="' + r.id + '">' + (r.enabled ? 'On' : 'Off') + '</button>' +
+    '</div>';
+}
+
+function renderRemindersTab() {
+  const rs = state.reminders.slice().sort(function (a, b) {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+    return (a.nextDue || '').localeCompare(b.nextDue || '');
+  });
+  let html = '<p class="fineprint">Reminders appear in <b>Today</b> when due. They don’t buzz your phone (a browser app can’t without a server). Switch on the ones you want.</p>';
+  html += rs.length ? rs.map(reminderRowHTML).join('') : '<div class="empty">No reminders.</div>';
+  $view.innerHTML = html;
+  $view.querySelectorAll('.rem-main').forEach(function (b) {
+    b.onclick = function () { const r = state.reminders.find(function (x) { return x.id === b.dataset.rem; }); if (r) openReminderForm(r); };
+  });
+  $view.querySelectorAll('.toggle').forEach(function (b) {
+    b.onclick = function () {
+      const r = state.reminders.find(function (x) { return x.id === b.dataset.toggle; });
+      if (r) { r.enabled = !r.enabled; save(); renderRemindersTab(); }
+    };
+  });
+}
+
+function openReminderForm(existing) {
+  const isEdit = !!existing;
+  const r = existing || { title: '', freq: 'monthly', enabled: true, nextDue: todayISO(), notes: '' };
+  let freq = r.freq || 'monthly';
+  $sheet.innerHTML =
+    '<div class="sheet-inner">' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>' + (isEdit ? 'Edit reminder' : 'New reminder') + '</h2>' +
+    (isEdit ? '<button class="danger-link" id="delRem">Delete</button>' : '') + '</div>' +
+    field('Title', 'rTitle', r.title, 'e.g. CPF payment') +
+    '<div class="field"><span>Repeat</span><div class="chips" id="rFreq">' +
+    REMINDER_FREQS.map(function (f) { return '<button class="chip' + (f[0] === freq ? ' on' : '') + '" data-f="' + f[0] + '">' + f[1] + '</button>'; }).join('') +
+    '</div></div>' +
+    '<label class="field"><span>Next due</span><input type="date" id="rNext" value="' + (r.nextDue || todayISO()) + '"></label>' +
+    '<label class="field"><span>Notes</span><textarea id="rNotes" class="li-desc" rows="2" placeholder="Optional">' + esc(r.notes || '') + '</textarea></label>' +
+    (isEdit ? '<button class="btn big" id="rDone">Mark done → next ' + FREQ_LABEL[freq].toLowerCase() + '</button>' : '') +
+    '<button class="btn ghost big" id="saveRem">Save reminder</button>' +
+    '</div>';
+  $sheet.classList.remove('hidden');
+  $sheet.scrollTop = 0;
+  const q = function (s) { return $sheet.querySelector(s); };
+  q('#closeSheet').onclick = backToTab;
+  q('#rFreq').querySelectorAll('.chip').forEach(function (b) {
+    b.onclick = function () { freq = b.dataset.f; q('#rFreq').querySelectorAll('.chip').forEach(function (x) { x.classList.toggle('on', x.dataset.f === freq); }); };
+  });
+
+  const rDone = q('#rDone');
+  if (rDone) rDone.onclick = function () {
+    const cur = q('#rNext').value || todayISO();
+    existing.nextDue = advanceDate(cur, freq);
+    existing.freq = freq;
+    save();
+    backToTab();
+    showSnack('Done — next on ' + fmtDate(existing.nextDue));
+  };
+
+  if (isEdit) {
+    q('#delRem').onclick = function () {
+      const idx = state.reminders.indexOf(existing);
+      state.reminders = state.reminders.filter(function (x) { return x.id !== existing.id; });
+      save();
+      backToTab();
+      showSnack('Reminder deleted', function () {
+        state.reminders.splice(idx < 0 ? state.reminders.length : Math.min(idx, state.reminders.length), 0, existing);
+        save();
+        backToTab();
+      });
+    };
+  }
+
+  q('#saveRem').onclick = function () {
+    const title = q('#rTitle').value.trim();
+    if (!title) { q('#rTitle').focus(); showSnack('Give the reminder a title'); return; }
+    const obj = { title: title, freq: freq, nextDue: q('#rNext').value || todayISO(), notes: q('#rNotes').value.trim() };
+    if (isEdit) {
+      const i = state.reminders.findIndex(function (x) { return x.id === existing.id; });
+      if (i !== -1) state.reminders[i] = Object.assign({}, existing, obj);
+    } else {
+      state.reminders.push(Object.assign({ id: uid(), enabled: true, createdAt: Date.now() }, obj));
+    }
+    save();
+    requestPersist();
+    backToTab();
+    showSnack('Reminder saved');
+  };
+}
+
+/* ---------- Contacts ---------- */
+
+function renderContactsTab() {
+  const all = sortedClients();
+  const filtered = all.filter(function (c) {
+    if (contactFilter === 'all') return true;
+    if (contactFilter === 'client') return c.kind !== 'vendor';
+    return c.kind === 'vendor' || c.kind === 'both';
+  });
+  let html =
+    '<div class="chips chips-margin" id="cFilter">' +
+    [['all', 'All'], ['client', 'Clients'], ['vendor', 'Vendors']].map(function (f) {
+      return '<button class="chip' + (f[0] === contactFilter ? ' on' : '') + '" data-f="' + f[0] + '">' + f[1] + '</button>';
+    }).join('') +
+    '</div>';
+  html += filtered.length ? filtered.map(clientRowHTML).join('')
+    : '<div class="empty">No contacts here.<br>Tap <b>+</b> to add one.</div>';
+  $view.innerHTML = html;
+  $view.querySelectorAll('#cFilter .chip').forEach(function (b) {
+    b.onclick = function () { contactFilter = b.dataset.f; renderContactsTab(); };
+  });
+  $view.querySelectorAll('.entry[data-client]').forEach(function (btn) {
+    btn.onclick = function () { const c = contactById(btn.dataset.client); if (c) openClientForm(c, backToTab); };
+  });
+}
+
 /* ===================== Init ===================== */
 
-document.querySelectorAll('.tab').forEach(function (b) {
-  b.onclick = function () { view.tab = b.dataset.tab; render(); };
-});
-
-document.getElementById('fab').onclick = function () { openSheet(); };
+document.getElementById('homeBtn').onclick = goHome;
 
 ensureClientsSeed();
+ensureRemindersSeed();
 requestPersist();
 render();
-refreshPersistStatus(function () { if (view.tab === 'export') renderExport(); });
+refreshPersistStatus(function () { if (view.module === 'accountant' && view.tab === 'export') renderExport(); });
 maybePromptBackup();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {

@@ -13,20 +13,16 @@
 <body>
 
 <header class="topbar">
+  <button id="homeBtn" class="home-btn hidden" aria-label="Home">‹</button>
   <h1>THE ASSEMBLY</h1>
-  <span class="subtitle">Accounts</span>
+  <span class="subtitle" id="moduleLabel"></span>
 </header>
 
 <main id="view"></main>
 
-<button id="fab" class="fab" aria-label="Add entry">+</button>
+<button id="fab" class="fab hidden" aria-label="Add">+</button>
 
-<nav class="tabbar">
-  <button data-tab="month" class="tab active">Month</button>
-  <button data-tab="history" class="tab">History</button>
-  <button data-tab="invoice" class="tab">Invoice</button>
-  <button data-tab="export" class="tab">Export</button>
-</nav>
+<nav class="tabbar hidden" id="tabbar"></nav>
 
 <div id="sheet" class="sheet hidden"></div>
 <div id="snackbar" class="snackbar hidden"></div>
