@@ -966,11 +966,21 @@ function openClientForm(existing) {
 
 /* ---------- Invoice tab ---------- */
 
+const INV_STATUS_LABEL = { void: 'VOID', paid: 'PAID', overdue: 'OVERDUE', outstanding: 'OUTSTANDING' };
+
+function invStatus(inv) {
+  if (inv.status === 'void') return 'void';
+  if (inv.paid) return 'paid';
+  if (inv.dueDate && inv.dueDate < todayISO()) return 'overdue';
+  return 'outstanding';
+}
+
 function invRowHTML(inv) {
-  const isVoid = inv.status === 'void';
-  return '<button class="entry' + (isVoid ? ' void' : '') + '" data-inv="' + inv.id + '">' +
-    '<span class="entry-main"><span class="entry-title">' + esc(inv.number) + ' · ' + esc(inv.client.name) + (isVoid ? ' · VOID' : '') + '</span>' +
-    '<span class="entry-sub">' + esc(fmtDate(inv.date)) + (inv.gstMode === 'registered' ? ' · GST' : '') + '</span></span>' +
+  const st = invStatus(inv);
+  const badge = '<span class="badge ' + st + '">' + INV_STATUS_LABEL[st] + '</span>';
+  return '<button class="entry' + (st === 'void' ? ' void' : '') + '" data-inv="' + inv.id + '">' +
+    '<span class="entry-main"><span class="entry-title">' + esc(inv.number) + ' · ' + esc(inv.client.name) + '</span>' +
+    '<span class="entry-sub">' + esc(fmtDate(inv.date)) + (inv.gstMode === 'registered' ? ' · GST' : '') + ' ' + badge + '</span></span>' +
     '<span class="entry-amt">' + fmtMoney(inv.total) + '</span>' +
     '</button>';
 }
@@ -986,6 +996,18 @@ function renderInvoiceTab() {
     '<button id="clientsBtn" class="btn ghost">Clients</button>' +
     '<button id="coBtn" class="btn ghost">Company details</button></div>';
   if (invs.length) {
+    const active = invs.filter(function (i) { return i.status !== 'void'; });
+    const unpaid = active.filter(function (i) { return !i.paid; });
+    const outstanding = unpaid.reduce(function (s, i) { return s + i.total; }, 0);
+    const overdueTotal = unpaid.filter(function (i) { return i.dueDate && i.dueDate < todayISO(); }).reduce(function (s, i) { return s + i.total; }, 0);
+    html +=
+      '<div class="card outstanding-card"><h3>Outstanding</h3>' +
+      (unpaid.length
+        ? '<div class="big-amount">' + fmtMoney(outstanding) + '</div>' +
+          '<p>' + unpaid.length + ' unpaid invoice' + (unpaid.length === 1 ? '' : 's') +
+          (overdueTotal ? ' · <span class="warn">' + fmtMoney(overdueTotal) + ' overdue</span>' : '') + '</p>'
+        : '<p class="ok">All invoices paid ✓</p>') +
+      '</div>';
     html += '<h3 class="sec">Past invoices</h3>' + invs.map(invRowHTML).join('');
   } else {
     html += '<div class="empty">No invoices yet.<br>Tap <b>New invoice</b> to create your first.</div>';
@@ -1268,19 +1290,27 @@ function openInvoiceView(inv) {
   const lines = inv.lineItems.map(function (it, i) {
     return '<div class="pnl-row"><span>' + esc(it.desc || '(item ' + (i + 1) + ')') + ' × ' + esc(it.qty) + '</span><span>' + fmtMoney(Math.round(it.qty * it.unitPrice)) + '</span></div>';
   }).join('');
-  const isVoid = inv.status === 'void';
+  const st = invStatus(inv);
+  const isVoid = st === 'void';
+  const paidControl = isVoid ? '' :
+    (inv.paid
+      ? '<label class="field"><span>Paid on</span><input type="date" id="paidDate" value="' + (inv.paidDate || todayISO()) + '"></label>' +
+        '<button class="btn ghost big" id="markUnpaid">Mark as unpaid</button>'
+      : '<button class="btn big" id="markPaid">Mark as paid</button>');
   $sheet.innerHTML =
     '<div class="sheet-inner">' +
-    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>' + esc(inv.number) + (isVoid ? ' <span class="void-badge">VOID</span>' : '') + '</h2></div>' +
-    '<div class="card"><h3>' + esc(inv.client.name) + '</h3>' +
-    '<p>' + esc(fmtDate(inv.date)) + ' · Due ' + esc(fmtDate(inv.dueDate)) + ' · Net ' + inv.terms + '</p>' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>' + esc(inv.number) + '</h2></div>' +
+    '<div class="card"><h3>' + esc(inv.client.name) + ' <span class="badge ' + st + '">' + INV_STATUS_LABEL[st] + '</span></h3>' +
+    '<p>' + esc(fmtDate(inv.date)) + ' · Due ' + esc(fmtDate(inv.dueDate)) + ' · Net ' + inv.terms +
+      (inv.paid && inv.paidDate ? ' · Paid ' + esc(fmtDate(inv.paidDate)) : '') + '</p>' +
     (isVoid ? '<p class="warn">Voided — removed from your P&amp;L. The number stays on record.</p>' : '') + '</div>' +
     '<h3 class="sec">Items</h3>' + lines +
     '<div class="inv-totals">' +
     '<div class="pnl-row"><span>Subtotal</span><span>' + fmtMoney(inv.subtotal) + '</span></div>' +
     '<div class="pnl-row"><span>' + (inv.gstMode === 'registered' ? 'GST (9%)' : 'GST (not applicable)') + '</span><span>' + fmtMoney(inv.gst) + '</span></div>' +
     '<div class="pnl-row net"><span>Total</span><span>' + fmtMoney(inv.total) + '</span></div></div>' +
-    '<button class="btn big" id="reDl">Download .xlsx again</button>' +
+    paidControl +
+    '<button class="btn ghost big" id="reDl">Download .xlsx again</button>' +
     '<button class="btn ghost big" id="dupInv">Duplicate as new invoice</button>' +
     (isVoid
       ? '<button class="btn ghost big" id="restoreInv">Restore (un-void)</button>'
@@ -1305,6 +1335,12 @@ function openInvoiceView(inv) {
   q('#dupInv').onclick = function () {
     openInvoiceForm({ client: inv.client, lineItems: inv.lineItems, gstMode: inv.gstMode, terms: inv.terms });
   };
+  const markPaid = q('#markPaid');
+  if (markPaid) markPaid.onclick = function () { inv.paid = true; inv.paidDate = todayISO(); save(); render(); openInvoiceView(inv); showSnack('Marked paid'); };
+  const markUnpaid = q('#markUnpaid');
+  if (markUnpaid) markUnpaid.onclick = function () { inv.paid = false; delete inv.paidDate; save(); render(); openInvoiceView(inv); showSnack('Marked unpaid'); };
+  const paidDateInput = q('#paidDate');
+  if (paidDateInput) paidDateInput.onchange = function () { inv.paidDate = paidDateInput.value || todayISO(); save(); render(); };
   if (isVoid) q('#restoreInv').onclick = function () { restoreInvoice(inv); };
   else q('#voidInv').onclick = function () { voidInvoice(inv); };
   q('#delInv').onclick = function () { deleteInvoice(inv); };
