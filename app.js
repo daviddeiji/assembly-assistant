@@ -54,10 +54,11 @@ function load() {
       d.clients = Array.isArray(d.clients) ? d.clients : [];
       d.tasks = Array.isArray(d.tasks) ? d.tasks : [];
       d.reminders = Array.isArray(d.reminders) ? d.reminders : [];
+      d.meetings = Array.isArray(d.meetings) ? d.meetings : [];
       return d;
     }
   } catch (err) { /* corrupt data — start fresh, backups are the safety net */ }
-  return { version: 1, entries: [], invoices: [], clients: [], tasks: [], reminders: [], settings: {} };
+  return { version: 1, entries: [], invoices: [], clients: [], tasks: [], reminders: [], meetings: [], settings: {} };
 }
 
 function save() {
@@ -103,13 +104,14 @@ function hasUserData() {
   return state.entries.length > 0 || state.invoices.length > 0 ||
     state.clients.some(function (c) { return c.name && c.name.trim(); }) ||
     state.tasks.length > 0 ||
+    state.meetings.length > 0 ||
     state.reminders.some(function (r) { return !r.builtin; });
 }
 
 // Cheap fingerprint of the meaningful data (ignores settings/metadata) so we
 // know whether anything has actually changed since the last backup.
 function dataFingerprint() {
-  const s = JSON.stringify({ e: state.entries, i: state.invoices, c: state.clients, t: state.tasks, r: state.reminders });
+  const s = JSON.stringify({ e: state.entries, i: state.invoices, c: state.clients, t: state.tasks, r: state.reminders, m: state.meetings });
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
   return h.toString(36) + '.' + s.length;
@@ -217,12 +219,13 @@ const $view = document.getElementById('view');
 const MODULES = {
   accountant: { label: 'Accounts', defaultTab: 'month', tabs: [['month', 'Month'], ['history', 'History'], ['invoice', 'Invoice'], ['export', 'Export']] },
   admin: { label: 'Admin', defaultTab: 'today', tabs: [['today', 'Today'], ['tasks', 'Tasks'], ['reminders', 'Reminders'], ['contacts', 'Contacts']] },
+  pa: { label: 'Assistant', defaultTab: 'agenda', tabs: [['agenda', 'Agenda'], ['meetings', 'Meetings'], ['followups', 'Follow-ups']] },
 };
 
 const MODULE_CARDS = [
   { id: 'admin', title: 'Admin', desc: 'Client jobs, reminders, contacts', icon: '✓', available: true },
   { id: 'accountant', title: 'Accountant', desc: 'Income, expenses, invoices, P&L', icon: 'S$', available: true },
-  { id: 'pa', title: 'Personal Assistant', desc: 'Daily agenda & meeting notes', icon: '◷', available: false },
+  { id: 'pa', title: 'Personal Assistant', desc: 'Agenda, meeting notes, follow-ups', icon: '◷', available: true },
   { id: 'researcher', title: 'Researcher', desc: 'Saved links & AI summaries', icon: '⌕', available: false },
 ];
 
@@ -266,6 +269,10 @@ function render() {
     else if (view.tab === 'tasks') renderTasksTab();
     else if (view.tab === 'reminders') renderRemindersTab();
     else renderContactsTab();
+  } else if (view.module === 'pa') {
+    if (view.tab === 'agenda') renderAgenda();
+    else if (view.tab === 'meetings') renderMeetingsTab();
+    else renderFollowupsTab();
   }
 }
 
@@ -288,6 +295,7 @@ function updateFab() {
     else if (view.tab === 'contacts') { label = 'Add contact'; action = function () { openClientForm(null, backToTab); }; }
     else { label = 'Add task'; action = function () { openTaskForm(null); }; }
   }
+  else if (view.module === 'pa') { label = 'Add meeting'; action = function () { openMeetingForm(null); }; }
   if (action) {
     fab.classList.remove('hidden');
     fab.setAttribute('aria-label', label);
@@ -679,6 +687,7 @@ function restoreBackup(file) {
     data.clients = Array.isArray(data.clients) ? data.clients : [];
     data.tasks = Array.isArray(data.tasks) ? data.tasks : [];
     data.reminders = Array.isArray(data.reminders) ? data.reminders : [];
+    data.meetings = Array.isArray(data.meetings) ? data.meetings : [];
     state = data;
     ensureClientsSeed();
     ensureRemindersSeed();
@@ -2105,6 +2114,232 @@ function renderContactsTab() {
   });
   $view.querySelectorAll('.entry[data-client]').forEach(function (btn) {
     btn.onclick = function () { const c = contactById(btn.dataset.client); if (c) openClientForm(c, backToTab); };
+  });
+}
+
+/* ===================== Personal Assistant module ===================== */
+
+function meetingById(id) { return state.meetings.find(function (m) { return m.id === id; }); }
+function meetingActionTasks(meetingId) { return state.tasks.filter(function (t) { return t.meetingId === meetingId; }); }
+function followupTasks() { return state.tasks.filter(function (t) { return !!t.meetingId; }); }
+function meetingAttendeeNames(m) { return (m.contactIds || []).map(function (id) { return contactName(id); }).filter(Boolean); }
+
+/* ---------- Agenda ---------- */
+
+function renderAgenda() {
+  const today = todayISO();
+  const in7 = addDays(today, 7);
+  const items = [];
+  state.tasks.forEach(function (t) { if (t.status !== 'done' && t.deadline) items.push({ date: t.deadline, type: 'task', obj: t }); });
+  state.reminders.forEach(function (r) { if (r.enabled && r.nextDue) items.push({ date: r.nextDue, type: 'reminder', obj: r }); });
+  state.meetings.forEach(function (m) { if (m.date && m.date >= today) items.push({ date: m.date, type: 'meeting', obj: m }); });
+  items.sort(function (a, b) { return a.date.localeCompare(b.date); });
+
+  const buckets = [
+    ['Overdue', items.filter(function (i) { return i.date < today; })],
+    ['Today', items.filter(function (i) { return i.date === today; })],
+    ['Next 7 days', items.filter(function (i) { return i.date > today && i.date <= in7; })],
+    ['Later', items.filter(function (i) { return i.date > in7; }).slice(0, 25)],
+  ];
+  let html;
+  if (!items.length) html = '<div class="empty">Nothing on your agenda.<br>Log a meeting, or add tasks and reminders in Admin.</div>';
+  else html = buckets.map(function (b) { return b[1].length ? '<h3 class="sec">' + b[0] + '</h3>' + b[1].map(agendaRowHTML).join('') : ''; }).join('');
+  $view.innerHTML = html;
+  wireAgendaRows($view);
+}
+
+function agendaRowHTML(item) {
+  if (item.type === 'meeting') {
+    const m = item.obj;
+    const who = meetingAttendeeNames(m).join(', ');
+    return '<button class="entry" data-meeting="' + m.id + '">' +
+      '<span class="entry-main"><span class="entry-title">📅 ' + esc(m.title || 'Meeting') + '</span>' +
+      '<span class="entry-sub">' + esc(who || 'No attendees') + ' · ' + esc(fmtDate(item.date)) + '</span></span>' +
+      '<span class="badge ' + dateClass(item.date) + '">' + dueLabel(item.date) + '</span></button>';
+  }
+  return todayRowHTML(item);
+}
+
+function wireAgendaRows(root) {
+  root.querySelectorAll('.entry[data-task]').forEach(function (b) { b.onclick = function () { const t = state.tasks.find(function (x) { return x.id === b.dataset.task; }); if (t) openTaskForm(t); }; });
+  root.querySelectorAll('.entry[data-reminder]').forEach(function (b) { b.onclick = function () { const r = state.reminders.find(function (x) { return x.id === b.dataset.reminder; }); if (r) openReminderForm(r); }; });
+  root.querySelectorAll('.entry[data-meeting]').forEach(function (b) { b.onclick = function () { const m = meetingById(b.dataset.meeting); if (m) openMeetingForm(m); }; });
+}
+
+/* ---------- Meetings ---------- */
+
+function meetingRowHTML(m) {
+  const who = meetingAttendeeNames(m).join(', ');
+  const open = meetingActionTasks(m.id).filter(function (t) { return t.status !== 'done'; }).length;
+  const sub = [esc(fmtDate(m.date))];
+  if (who) sub.push(esc(who));
+  return '<button class="entry" data-meeting="' + m.id + '">' +
+    '<span class="entry-main"><span class="entry-title">' + esc(m.title || 'Meeting') + '</span>' +
+    '<span class="entry-sub">' + sub.join(' · ') + '</span></span>' +
+    (open ? '<span class="badge soon">' + open + ' open</span>' : '') + '</button>';
+}
+
+function renderMeetingsTab() {
+  const ms = state.meetings.slice().sort(function (a, b) { return (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0); });
+  $view.innerHTML = ms.length ? ms.map(meetingRowHTML).join('') : '<div class="empty">No meetings yet.<br>Tap <b>+</b> to log one with notes and follow-ups.</div>';
+  $view.querySelectorAll('.entry[data-meeting]').forEach(function (b) { b.onclick = function () { const m = meetingById(b.dataset.meeting); if (m) openMeetingForm(m); }; });
+}
+
+// Sync the in-memory action-item list back to tasks (each is a task with meetingId).
+function syncMeetingActions(m, actions) {
+  const before = meetingActionTasks(m.id);
+  const kept = [];
+  actions.forEach(function (a) {
+    if (!a.title.trim()) return;
+    if (a.taskId) {
+      const t = state.tasks.find(function (x) { return x.id === a.taskId; });
+      if (t) {
+        t.title = a.title.trim();
+        t.deadline = a.deadline || '';
+        t.clientId = (m.contactIds || [])[0] || '';
+        if (a.done) { t.status = 'done'; t.doneAt = t.doneAt || Date.now(); }
+        else { if (t.status === 'done') { t.status = 'todo'; } delete t.doneAt; }
+        kept.push(t.id);
+      }
+    } else {
+      const nt = { id: uid(), title: a.title.trim(), clientId: (m.contactIds || [])[0] || '', deadline: a.deadline || '', status: a.done ? 'done' : 'todo', checklist: [], notes: '', meetingId: m.id, createdAt: Date.now() };
+      if (a.done) nt.doneAt = Date.now();
+      state.tasks.push(nt);
+      kept.push(nt.id);
+    }
+  });
+  before.forEach(function (t) { if (kept.indexOf(t.id) === -1) state.tasks = state.tasks.filter(function (x) { return x.id !== t.id; }); });
+}
+
+function openMeetingForm(existing) {
+  const isEdit = !!existing;
+  const m = existing || { id: uid(), date: todayISO(), title: '', contactIds: [], notes: '', createdAt: Date.now() };
+  let contactIds = (m.contactIds || []).slice();
+  let actions = meetingActionTasks(m.id).map(function (t) { return { taskId: t.id, title: t.title, deadline: t.deadline || '', done: t.status === 'done' }; });
+
+  $sheet.innerHTML =
+    '<div class="sheet-inner">' +
+    '<div class="sheet-head"><button class="close-btn" id="closeSheet" aria-label="Close">✕</button><h2>' + (isEdit ? 'Edit meeting' : 'New meeting') + '</h2>' +
+    (isEdit ? '<button class="danger-link" id="delMeeting">Delete</button>' : '') + '</div>' +
+    '<label class="field"><span>Date</span><input type="date" id="mDate" value="' + (m.date || todayISO()) + '"></label>' +
+    field('Title (optional)', 'mTitle', m.title, 'e.g. Q3 planning') +
+    '<div class="field"><span>Who</span><div class="chips chips-margin" id="attChips"></div>' +
+    '<select id="attAdd"></select></div>' +
+    '<label class="field"><span>Notes</span><textarea id="mNotes" class="li-desc" rows="5" placeholder="What was discussed">' + esc(m.notes || '') + '</textarea></label>' +
+    '<div class="field"><span>Action items / follow-ups</span><div id="aiBox"></div>' +
+    '<button class="btn ghost" id="addAction">+ Add action item</button></div>' +
+    '<button class="btn big" id="saveMeeting">Save meeting</button>' +
+    '</div>';
+  $sheet.classList.remove('hidden');
+  $sheet.scrollTop = 0;
+  const q = function (s) { return $sheet.querySelector(s); };
+  q('#closeSheet').onclick = backToTab;
+
+  function renderAttendees() {
+    q('#attChips').innerHTML = contactIds.length
+      ? contactIds.map(function (id) { const c = contactById(id); return '<button class="chip on" data-att="' + id + '">' + esc(c ? clientLabel(c) : '?') + ' ✕</button>'; }).join('')
+      : '<span class="fineprint">No attendees yet.</span>';
+    q('#attChips').querySelectorAll('[data-att]').forEach(function (b) {
+      b.onclick = function () { contactIds = contactIds.filter(function (x) { return x !== b.dataset.att; }); renderAttendees(); };
+    });
+    const avail = sortedClients().filter(function (c) { return c.name && c.name.trim() && contactIds.indexOf(c.id) === -1; });
+    q('#attAdd').innerHTML = '<option value="">+ Add attendee…</option>' + avail.map(function (c) { return '<option value="' + c.id + '">' + esc(clientLabel(c)) + '</option>'; }).join('');
+  }
+  q('#attAdd').onchange = function () { if (q('#attAdd').value) { contactIds.push(q('#attAdd').value); renderAttendees(); } };
+  renderAttendees();
+
+  function readActions() {
+    $sheet.querySelectorAll('.ai-card').forEach(function (card) {
+      const i = +card.dataset.i;
+      actions[i].title = card.querySelector('.ai-title').value;
+      actions[i].deadline = card.querySelector('.ai-date').value;
+    });
+  }
+  function renderActions() {
+    q('#aiBox').innerHTML = actions.map(function (a, i) {
+      return '<div class="ai-card" data-i="' + i + '">' +
+        '<input class="ai-title" placeholder="Action item / follow-up" value="' + esc(a.title) + '">' +
+        '<div class="ai-row">' +
+        '<button class="ai-done' + (a.done ? ' on' : '') + '" data-ai="' + i + '">' + (a.done ? '✓ Done' : 'Open') + '</button>' +
+        '<input type="date" class="ai-date" value="' + (a.deadline || '') + '">' +
+        '<button class="ai-del" data-ai="' + i + '" aria-label="Remove">✕</button>' +
+        '</div></div>';
+    }).join('');
+    q('#aiBox').querySelectorAll('.ai-done').forEach(function (b) { b.onclick = function () { readActions(); actions[+b.dataset.ai].done = !actions[+b.dataset.ai].done; renderActions(); }; });
+    q('#aiBox').querySelectorAll('.ai-del').forEach(function (b) { b.onclick = function () { readActions(); actions.splice(+b.dataset.ai, 1); renderActions(); }; });
+  }
+  renderActions();
+  q('#addAction').onclick = function () { readActions(); actions.push({ title: '', deadline: '', done: false }); renderActions(); const t = $sheet.querySelectorAll('.ai-title'); if (t.length) t[t.length - 1].focus(); };
+
+  if (isEdit) {
+    q('#delMeeting').onclick = function () {
+      const idx = state.meetings.indexOf(existing);
+      state.meetings = state.meetings.filter(function (x) { return x.id !== existing.id; });
+      save();
+      backToTab();
+      showSnack('Meeting deleted', function () {
+        state.meetings.splice(idx < 0 ? state.meetings.length : Math.min(idx, state.meetings.length), 0, existing);
+        save();
+        backToTab();
+      });
+    };
+  }
+
+  q('#saveMeeting').onclick = function () {
+    readActions();
+    m.date = q('#mDate').value || todayISO();
+    m.title = q('#mTitle').value.trim();
+    m.contactIds = contactIds;
+    m.notes = q('#mNotes').value.trim();
+    if (!isEdit) state.meetings.push(m);
+    syncMeetingActions(m, actions);
+    save();
+    requestPersist();
+    backToTab();
+    showSnack('Meeting saved');
+  };
+}
+
+/* ---------- Follow-ups ---------- */
+
+function followupRowHTML(t) {
+  const m = t.meetingId ? meetingById(t.meetingId) : null;
+  const src = m ? (m.title || 'Meeting') + ' · ' + fmtDate(m.date) : 'From a past meeting';
+  const sub = [src];
+  if (t.deadline) sub.push(fmtDate(t.deadline));
+  const done = t.status === 'done';
+  return '<div class="fu-row' + (done ? ' done' : '') + '">' +
+    '<button class="fu-check' + (done ? ' on' : '') + '" data-fucheck="' + t.id + '" aria-label="Toggle done">' + (done ? '✓' : '') + '</button>' +
+    '<button class="fu-main" data-fu="' + t.id + '">' +
+    '<span class="entry-title">' + esc(t.title || '(untitled)') + '</span>' +
+    '<span class="entry-sub">' + esc(sub.join(' · ')) + '</span></button>' +
+    (t.deadline && !done ? '<span class="badge ' + dateClass(t.deadline) + '">' + dueLabel(t.deadline) + '</span>' : '') +
+    '</div>';
+}
+
+function renderFollowupsTab() {
+  const fus = followupTasks();
+  const open = fus.filter(function (t) { return t.status !== 'done'; }).sort(function (a, b) { return (a.deadline || '9999').localeCompare(b.deadline || '9999'); });
+  const done = fus.filter(function (t) { return t.status === 'done'; });
+  let html = '<p class="fineprint">Action items from your meetings. Tick to mark done, or tap to edit.</p>';
+  if (!fus.length) html += '<div class="empty">No follow-ups yet.<br>Add action items inside a meeting.</div>';
+  else {
+    if (open.length) html += '<h3 class="sec">Open (' + open.length + ')</h3>' + open.map(followupRowHTML).join('');
+    if (done.length) html += '<h3 class="sec">Done (' + done.length + ')</h3>' + done.slice(0, 25).map(followupRowHTML).join('');
+  }
+  $view.innerHTML = html;
+  $view.querySelectorAll('.fu-check').forEach(function (b) {
+    b.onclick = function () {
+      const t = state.tasks.find(function (x) { return x.id === b.dataset.fucheck; });
+      if (!t) return;
+      if (t.status === 'done') { t.status = 'todo'; delete t.doneAt; }
+      else { t.status = 'done'; t.doneAt = Date.now(); }
+      save();
+      renderFollowupsTab();
+    };
+  });
+  $view.querySelectorAll('.fu-main').forEach(function (b) {
+    b.onclick = function () { const t = state.tasks.find(function (x) { return x.id === b.dataset.fu; }); if (t) openTaskForm(t); };
   });
 }
 

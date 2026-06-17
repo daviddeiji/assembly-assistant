@@ -334,6 +334,23 @@ textarea.li-desc { font-family: inherit; resize: vertical; min-height: 76px; }
 .toggle { flex: none; min-width: 54px; padding: 8px 12px; border-radius: 20px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); font-weight: 600; font-size: 13px; }
 .toggle.on { background: var(--green); color: #fff; border-color: var(--green); }
 
+/* ---------- Meeting action items ---------- */
+.ai-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; margin-bottom: 8px; }
+.ai-title { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); margin-bottom: 8px; }
+.ai-row { display: flex; gap: 8px; align-items: center; }
+.ai-done { flex: 1; padding: 9px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); font-weight: 600; font-size: 13px; }
+.ai-done.on { background: var(--green); color: #fff; border-color: var(--green); }
+.ai-date { flex: 1; min-width: 0; box-sizing: border-box; padding: 9px; font-size: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); }
+.ai-del { flex: none; width: 34px; height: 34px; border: none; background: none; color: var(--red); font-size: 15px; }
+
+/* ---------- Follow-ups ---------- */
+.fu-row { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-bottom: 8px; }
+.fu-check { flex: none; width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--green); font-size: 16px; font-weight: 700; }
+.fu-check.on { background: var(--green); color: #fff; border-color: var(--green); }
+.fu-main { flex: 1; min-width: 0; background: none; border: none; text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 0; }
+.fu-main .entry-title { font-size: 16px; }
+.fu-row.done .fu-main .entry-title { text-decoration: line-through; color: var(--muted); }
+
 /* ---------- Checklist ---------- */
 .cl-item { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .cl-check { flex: none; width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--green); font-size: 16px; font-weight: 700; }
